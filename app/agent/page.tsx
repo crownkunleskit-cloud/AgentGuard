@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { BrowserProvider, Contract, formatEther, parseEther, isAddress } from 'ethers';
+import { Brand } from '../components/Mark';
 
 const CHAIN_ID = Number(process.env.NEXT_PUBLIC_RH_CHAIN_ID || process.env.NEXT_PUBLIC_RH_TESTNET_CHAIN_ID || '46630');
 const NETWORK_NAME = process.env.NEXT_PUBLIC_RH_NETWORK_NAME || (CHAIN_ID === 4663 ? 'MAINNET' : 'TESTNET');
@@ -79,22 +80,38 @@ export default function AgentExecutionPage() {
     } finally { setBusy(false); }
   }
 
-  return <main className="ag-exec-page">
-    <header className="ag-exec-nav"><a className="ag-app-brand" href="/"><span className="ag-brand-orbit"><i/></span><b>AgentGuard</b></a><div className="ag-exec-network"><i/> Robinhood Chain <em>{NETWORK_NAME.toLowerCase()}</em></div></header>
-    <div className="ag-exec-wrap">
-      <a className="ag-exec-back" href="/">← Back to workspace</a>
-      <section className="ag-exec-heading"><p>AGENT EXECUTION · V1</p><h1>Execute with<br/><span>permission, not trust.</span></h1><div>Transactions are checked against the vault’s on-chain rules before they can leave protected custody.</div></section>
-      <section className="ag-exec-card">
-        <div className="ag-exec-card-head"><div><small>SECURE TRANSACTION CONSOLE</small><h2>Protected transfer</h2></div><span className="ag-exec-lock">ON-CHAIN ENFORCED</span></div>
-        <div className="ag-exec-agent"><div><small>CONNECTED AGENT WALLET</small><code>{agent || 'No agent wallet connected'}</code></div><button onClick={connectAgent} disabled={busy}>Connect agent wallet</button></div>
-        <label className="ag-exec-field">Protected vault address<input value={vault} onChange={e=>setVault(e.target.value)} placeholder="0x…" /></label>
-        <label className="ag-exec-field">Approved recipient address<input value={recipient} onChange={e=>setRecipient(e.target.value)} placeholder="Enter an owner-approved recipient 0x…" /></label>
-        <label className="ag-exec-field">Transfer amount <span>(native coin)</span><input type="number" min="0" step="0.0001" value={amount} onChange={e=>setAmount(e.target.value)} /></label>
-        <button className="ag-exec-submit" onClick={execute} disabled={busy || !agent}>{busy?'Processing transaction…':'Execute protected transfer'}</button>
-        <div className="ag-exec-message">{message}{txHash && <p><a href={`${EXPLORER}/tx/${txHash}`} target="_blank" rel="noreferrer">View transaction on explorer ↗</a></p>}</div>
-        <p className="ag-exec-footnote">The registered agent wallet needs native coin for gas. The vault must hold sufficient funds. Never enter a private key or recovery phrase.</p>
-      </section>
-    </div>
-  </main>;
-}
+  const ok = message.startsWith('SUCCESS');
 
+  return (
+    <main className="tool">
+      <header className="tool-top">
+        <Brand />
+        <span className="net"><i />Robinhood Chain <em>{NETWORK_NAME.toLowerCase()}</em></span>
+      </header>
+
+      <section className="tool-card">
+        <p className="kicker">AgentGuard V1, {NETWORK_NAME.toLowerCase()} tool</p>
+        <h1>Agent transaction execution</h1>
+        <p className="tool-lede">This page is for the registered agent wallet only. The vault contract enforces the recipient allowlist, pause state and spending limits. It does not expose or request private keys.</p>
+
+        <div className="tool-wallet">
+          <small>Connected agent wallet</small>
+          <code>{agent || 'Connect the registered agent wallet'}</code>
+          <button className="btn btn-ghost btn-sm" onClick={connectAgent} disabled={busy}>Connect agent wallet</button>
+        </div>
+
+        <label htmlFor="t-vault">Full protected vault address<input id="t-vault" className="mono" value={vault} onChange={e => setVault(e.target.value)} placeholder="0x…" /></label>
+        <label htmlFor="t-recipient">Approved recipient address<input id="t-recipient" className="mono" value={recipient} onChange={e => setRecipient(e.target.value)} placeholder="Enter an owner-approved recipient 0x…" /></label>
+        <label htmlFor="t-amount">Transfer amount (ETH)<input id="t-amount" type="number" min="0" step="0.0001" value={amount} onChange={e => setAmount(e.target.value)} /></label>
+
+        <button className="btn btn-primary tool-submit" onClick={execute} disabled={busy || !agent}>{busy ? 'Processing…' : 'Execute protected transfer'}</button>
+
+        <div className={`tool-msg ${ok ? 'is-ok' : ''}`} role="status">
+          {message}
+          {txHash && <p><a href={`${EXPLORER}/tx/${txHash}`} target="_blank" rel="noreferrer">View transaction on explorer</a></p>}
+        </div>
+        <p className="tool-foot">Use only the network configured for this build. The agent wallet needs native coin for gas. The vault must hold enough ETH for the transfer. Never paste a private key or recovery phrase here.</p>
+      </section>
+    </main>
+  );
+}
