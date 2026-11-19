@@ -287,6 +287,7 @@ export default function Landing({ onConnect, networkName, chainId, factoryAddres
               <li><a href={`${base}/address/${factoryAddress}`} target="_blank" rel="noreferrer">Vault factory {short(factoryAddress)}</a></li>
             )}
             <li><a href="/agent">Agent execution tool</a></li>
+            <li><a href="https://x.com/agentguard0" target="_blank" rel="noopener noreferrer">X / @agentguard0</a></li>
             <li>Robinhood Chain {net}, chain ID {chainId}</li>
           </ul>
         </div>
