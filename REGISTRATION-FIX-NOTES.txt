@@ -1,0 +1,22 @@
+AgentGuard registration reliability patch
+
+Changes:
+- The dashboard now scans the complete vault event history in bounded 2,000-block chunks.
+  The previous 10,000-block lookback could hide older registered agents because the
+  contract's agent mapping is not enumerable. A hidden existing agent could then be
+  submitted again and revert with AgentAlreadyRegistered.
+- Agent registration now checks the live vault owner and existing agent mapping before
+  prompting for a signature, and simulates registerAgent against the deployed vault.
+- The frontend ABI now includes the vault's custom errors so common reverts are reported
+  with actionable messages instead of "unknown custom error".
+
+No Solidity source, deployed contract, factory address, or deployment configuration
+was changed. No .env file is included.
+
+Verification:
+- A fresh npm build/test could not be completed in this environment because npm ci
+  timed out. Run npm ci, npm run contracts:compile, npm run contracts:test, and npm run
+  build locally before deploying.
+- This frontend patch cannot make a duplicate address register twice: the deployed
+  contract correctly rejects duplicate agent addresses. It supports multiple distinct
+  agent wallets, subject to the vault owner and valid limits.
