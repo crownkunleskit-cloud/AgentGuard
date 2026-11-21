@@ -86,14 +86,13 @@ export default function Home() {
     const [bal, global, code] = await Promise.all([p.getBalance(vault), c.globallyPaused(), p.getCode(vault)]);
     if (code === '0x') throw new Error('Vault address has no contract code on this network.');
     setVaultBalance(formatEther(bal)); setPaused(global);
-    // Some RPC providers reject large historical eth_getLogs ranges. The vault was
-    // deployed recently, so scan a bounded recent window in small chunks instead
-    // of letting one oversized query fail the entire dashboard refresh.
+    // Agent discovery must cover the vault's full history. A rolling 10,000-block
+    // window caused previously registered agents to disappear after a reload.
     const latest = await p.getBlockNumber();
-    const fromBlock = Math.max(0, latest - 10000);
-    const readLogs = async (filter: any) => {
+    const recentFromBlock = Math.max(0, latest - 10000);
+    const readLogs = async (filter: any, startBlock = recentFromBlock) => {
       const out: any[] = [];
-      for (let start = fromBlock; start <= latest; start += 2000) {
+      for (let start = startBlock; start <= latest; start += 2000) {
         const end = Math.min(latest, start + 1999);
         out.push(...await c.queryFilter(filter, start, end));
       }
@@ -102,7 +101,13 @@ export default function Home() {
     const [filterAgents, filterRecipients, filterTokens, filterNative, filterToken, filterWithdraw] = await Promise.all([
       c.filters.AgentRegistered(), c.filters.RecipientPermissionChanged(), c.filters.TokenPolicyChanged(), c.filters.NativeTransferExecuted(), c.filters.TokenTransferExecuted(), c.filters.OwnerWithdrawal(),
     ]);
-    const [aLogs, rLogs, tLogs, nLogs, ttLogs, wLogs] = await Promise.all([readLogs(filterAgents), readLogs(filterRecipients), readLogs(filterTokens), readLogs(filterNative), readLogs(filterToken), readLogs(filterWithdraw)]);
+    // Agent registrations are scanned from block zero so agents remain
+    // discoverable after the site is closed and reopened, regardless of age.
+    // Other dashboard activity remains on the recent window.
+    const [aLogs, rLogs, tLogs, nLogs, ttLogs, wLogs] = await Promise.all([
+      readLogs(filterAgents, 0),
+      readLogs(filterRecipients), readLogs(filterTokens), readLogs(filterNative), readLogs(filterToken), readLogs(filterWithdraw),
+    ]);
     const agentSet = new Set<string>(); for (const l of aLogs) { const x = (l as any).args?.agent; if (x) agentSet.add(x.toLowerCase()); }
     const agentRows: Agent[] = []; for (const a of agentSet) { const x = await c.agents(a); if (x.registered) agentRows.push({ address: a, registered: x.registered, paused: x.paused, maxNativePerTx: x.maxNativePerTx, maxNativePerDay: x.maxNativePerDay, dayStart: x.dayStart, nativeSpentToday: x.nativeSpentToday }); }
     setAgents(agentRows);
