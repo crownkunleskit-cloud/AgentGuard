@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BrowserProvider, Contract, formatEther, parseEther, isAddress } from 'ethers';
+import { BrowserProvider, Contract, formatEther, parseEther, isAddress, getAddress } from 'ethers';
 import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Wallet, X } from 'lucide-react';
 import Landing from './components/Landing';
 import { Brand } from './components/Mark';
@@ -18,7 +18,8 @@ const FACTORY_ABI = ['function vaultOf(address) view returns (address)', 'functi
 const VAULT_ABI = [
   'function owner() view returns(address)', 'function globallyPaused() view returns(bool)', 'function agents(address) view returns(bool registered,bool paused,uint128 maxNativePerTx,uint128 maxNativePerDay,uint64 dayStart,uint128 nativeSpentToday)',
   'function allowedRecipients(address) view returns(bool)', 'function allowedTokens(address) view returns(bool)', 'function tokenMaxPerTx(address) view returns(uint128)', 'function tokenMaxPerDay(address) view returns(uint128)',
-  'function registerAgent(address,uint128,uint128)', 'function setAgentLimits(address,uint128,uint128)', 'function setAgentPaused(address,bool)', 'function revokeAgent(address)', 'function setGlobalPause(bool)', 'function setRecipient(address,bool)', 'function setTokenPolicy(address,bool,uint128,uint128)', 'function ownerWithdrawNative(address payable,uint128)', 'function ownerWithdrawToken(address,address,uint128)',
+  'function registerAgent(address,uint128,uint128)',
+  'error NotOwner()', 'error ZeroAddress()', 'error AgentAlreadyRegistered()', 'error AgentNotRegistered()', 'error InvalidLimit()', 'function setAgentLimits(address,uint128,uint128)', 'function setAgentPaused(address,bool)', 'function revokeAgent(address)', 'function setGlobalPause(bool)', 'function setRecipient(address,bool)', 'function setTokenPolicy(address,bool,uint128,uint128)', 'function ownerWithdrawNative(address payable,uint128)', 'function ownerWithdrawToken(address,address,uint128)',
   'event AgentRegistered(address indexed agent,uint256 maxNativePerTx,uint256 maxNativePerDay)', 'event AgentStatusChanged(address indexed agent,bool paused)', 'event AgentRevoked(address indexed agent)', 'event RecipientPermissionChanged(address indexed recipient,bool allowed)', 'event TokenPolicyChanged(address indexed token,bool allowed,uint256 maxPerTx,uint256 maxPerDay)', 'event GlobalPauseChanged(bool paused)', 'event NativeTransferExecuted(address indexed agent,address indexed recipient,uint256 amount)', 'event TokenTransferExecuted(address indexed agent,address indexed token,address indexed recipient,uint256 amount)', 'event OwnerWithdrawal(address indexed asset,address indexed recipient,uint256 amount)',
 ];
 const chainId = Number(process.env.NEXT_PUBLIC_RH_CHAIN_ID || process.env.NEXT_PUBLIC_RH_TESTNET_CHAIN_ID || '46630');
@@ -86,23 +87,45 @@ export default function Home() {
     const [bal, global, code] = await Promise.all([p.getBalance(vault), c.globallyPaused(), p.getCode(vault)]);
     if (code === '0x') throw new Error('Vault address has no contract code on this network.');
     setVaultBalance(formatEther(bal)); setPaused(global);
-    // Some RPC providers reject large historical eth_getLogs ranges. The vault was
-    // deployed recently, so scan a bounded recent window in small chunks instead
-    // of letting one oversized query fail the entire dashboard refresh.
+    // Agent discovery is a correctness-critical, full-history scan. Never limit it
+    // to a recent lookback: mappings are not enumerable and old registrations would vanish.
     const latest = await p.getBlockNumber();
-    const fromBlock = Math.max(0, latest - 10000);
-    const readLogs = async (filter: any) => {
+    const readLogsAdaptive = async (filter: any, startBlock: number, endBlock: number): Promise<any[]> => {
       const out: any[] = [];
-      for (let start = fromBlock; start <= latest; start += 2000) {
-        const end = Math.min(latest, start + 1999);
-        out.push(...await c.queryFilter(filter, start, end));
+      const scan = async (from: number, to: number): Promise<void> => {
+        try {
+          out.push(...await c.queryFilter(filter, from, to));
+        } catch (err: any) {
+          const message = String(err?.shortMessage || err?.message || err).toLowerCase();
+          const rangeLimit = /too many|more than|limit exceeded|block range|range is too wide|query returned|response size|log response|exceeds maximum|maximum.*block|please limit|eth_getlogs/.test(message);
+          if (!rangeLimit || from >= to) {
+            throw new Error(`Could not load registered agents from vault history (${err?.shortMessage || err?.message || 'RPC error'}). No agents were removed. Check the Robinhood Chain RPC connection and refresh.`);
+          }
+          const mid = Math.floor((from + to) / 2);
+          await scan(from, mid);
+          await scan(mid + 1, to);
+        }
+      };
+      // Bounded requests, with automatic subdivision when the RPC rejects a range.
+      for (let from = startBlock; from <= endBlock; from += 2000) {
+        await scan(from, Math.min(endBlock, from + 1999));
       }
       return out;
+    };
+    const readRecentLogs = async (filter: any) => {
+      const from = Math.max(0, latest - 10000);
+      return readLogsAdaptive(filter, from, latest);
     };
     const [filterAgents, filterRecipients, filterTokens, filterNative, filterToken, filterWithdraw] = await Promise.all([
       c.filters.AgentRegistered(), c.filters.RecipientPermissionChanged(), c.filters.TokenPolicyChanged(), c.filters.NativeTransferExecuted(), c.filters.TokenTransferExecuted(), c.filters.OwnerWithdrawal(),
     ]);
-    const [aLogs, rLogs, tLogs, nLogs, ttLogs, wLogs] = await Promise.all([readLogs(filterAgents), readLogs(filterRecipients), readLogs(filterTokens), readLogs(filterNative), readLogs(filterToken), readLogs(filterWithdraw)]);
+    // Full history only for registration discovery. Activity and permission panels
+    // retain the existing recent-history behavior to keep refreshes lightweight.
+    const [aLogs, rLogs, tLogs, nLogs, ttLogs, wLogs] = await Promise.all([
+      readLogsAdaptive(filterAgents, 0, latest),
+      readRecentLogs(filterRecipients), readRecentLogs(filterTokens), readRecentLogs(filterNative),
+      readRecentLogs(filterToken), readRecentLogs(filterWithdraw),
+    ]);
     const agentSet = new Set<string>(); for (const l of aLogs) { const x = (l as any).args?.agent; if (x) agentSet.add(x.toLowerCase()); }
     const agentRows: Agent[] = []; for (const a of agentSet) { const x = await c.agents(a); if (x.registered) agentRows.push({ address: a, registered: x.registered, paused: x.paused, maxNativePerTx: x.maxNativePerTx, maxNativePerDay: x.maxNativePerDay, dayStart: x.dayStart, nativeSpentToday: x.nativeSpentToday }); }
     setAgents(agentRows);
@@ -126,7 +149,25 @@ export default function Home() {
   const transact = async (fn: () => Promise<any>, success: string, afterConfirm?: () => Promise<void>) => { setBusy(true); try { await ensureNetwork(); const tx = await fn(); notify('Transaction submitted. Waiting for confirmation…'); await tx.wait(); if (afterConfirm) await afterConfirm(); notify(success); await refresh(); } catch (e: any) { notify(e.shortMessage || e.reason || e.message || 'Transaction failed.'); } finally { setBusy(false); } };
 
   const createVault = () => transact(async () => { if (!isAddress(factoryAddress)) throw new Error('The configured factory address is invalid.'); const p = provider(); const code = await p.getCode(factoryAddress); if (code === '0x') throw new Error(`AgentGuard factory contract was not found on this network. Switch to the configured Robinhood Chain network (chain ID ${chainId}).`); const c = await signerContract(factoryAddress, FACTORY_ABI); return c.createVault(); }, `Protected vault created on Robinhood Chain ${networkName}.`, async () => { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (!isAddress(v) || v === ZERO) throw new Error('Vault creation confirmed, but the factory did not return a vault address. Refresh and check the explorer.'); setVaultAddress(v); });
-  const addAgent = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid agent wallet address.'); if (parseEther(perTx) <= 0n || parseEther(perDay) < parseEther(perTx)) throw new Error('Daily limit must be greater than or equal to the per-transaction limit, and both must be above zero.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.registerAgent(address, parseEther(perTx), parseEther(perDay)); }, 'Agent registered on-chain.', async () => { const c = new Contract(vaultAddress, VAULT_ABI, provider()); const a = await c.agents(address); if (!a.registered) throw new Error('Registration transaction confirmed, but the agent mapping did not update. Refresh and check the explorer.'); });
+  const addAgent = () => transact(async () => {
+    if (!isAddress(address)) throw new Error('Enter a valid agent wallet address.');
+    const agentAddress = getAddress(address);
+    if (agentAddress.toLowerCase() === account.toLowerCase()) throw new Error('The vault owner wallet cannot also be registered as an agent.');
+    const txLimit = parseEther(perTx), dayLimit = parseEther(perDay);
+    if (txLimit <= 0n || dayLimit < txLimit) throw new Error('Daily limit must be greater than or equal to the per-transaction limit, and both must be above zero.');
+    const c = await signerContract(vaultAddress, VAULT_ABI);
+    const [vaultOwner, existing] = await Promise.all([c.owner(), c.agents(agentAddress)]);
+    if (vaultOwner.toLowerCase() !== account.toLowerCase()) throw new Error('The connected wallet is not the owner of this vault.');
+    if (existing.registered) throw new Error('This wallet is already registered as an agent. Refresh the dashboard; do not register it again.');
+    // Simulate before asking the wallet to sign, so contract reverts are surfaced early.
+    await c.registerAgent.staticCall(agentAddress, txLimit, dayLimit);
+    return c.registerAgent(agentAddress, txLimit, dayLimit);
+  }, 'Agent registered on-chain.', async () => {
+    const c = new Contract(vaultAddress, VAULT_ABI, provider());
+    const agent = getAddress(address);
+    const a = await c.agents(agent);
+    if (!a.registered) throw new Error('Registration transaction confirmed, but the on-chain agent record could not be verified. Refresh and check the explorer.');
+  });
   const addRecipient = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid recipient address.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.setRecipient(address, true); }, 'Recipient allowlisted on-chain.');
   const addToken = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid token contract address.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.setTokenPolicy(address, true, BigInt(tokenTx), BigInt(tokenDay)); }, 'Token policy saved on-chain.');
   const fund = () => transact(async () => { const s = await provider().getSigner(); return s.sendTransaction({ to: vaultAddress, value: parseEther(amount) }); }, 'Vault funded.');
