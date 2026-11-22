@@ -37,6 +37,45 @@ const short = (s: string) => `${s.slice(0, 6)}…${s.slice(-4)}`;
 const money = (n: bigint) => `${Number(formatEther(n)).toFixed(4)} ${SYMBOL}`;
 const explorerBase = explorer.replace(/\/$/, '');
 
+function findRevertData(error: unknown): string[] {
+  const visited = new Set<unknown>();
+  const pending: Array<{ value: unknown; key: string }> = [{ value: error, key: '' }];
+  const candidates: Array<{ data: string; priority: number }> = [];
+  while (pending.length) {
+    const { value, key } = pending.pop()!;
+    if (!value || typeof value !== 'object' || visited.has(value)) continue;
+    visited.add(value);
+    for (const [childKey, child] of Object.entries(value)) {
+      if (typeof child === 'string' && /^0x[0-9a-fA-F]{8,}$/.test(child)) {
+        candidates.push({ data: child, priority: /data|revert|result/i.test(childKey) ? 1 : 0 });
+      } else if (child && typeof child === 'object') pending.push({ value: child, key: childKey || key });
+    }
+  }
+  return [...new Set(candidates.sort((a, b) => b.priority - a.priority).map(candidate => candidate.data))];
+}
+
+function explainVaultError(error: any, contractAddress: string): string {
+  const iface = new Contract(contractAddress, VAULT_ABI, new BrowserProvider(window.ethereum)).interface;
+  for (const rawData of findRevertData(error)) {
+    try {
+      const decoded = iface.parseError(rawData);
+      if (!decoded) continue;
+      const explanations: Record<string, string> = {
+        AgentAlreadyRegistered: 'This address is already registered. Refreshing the existing agent state.',
+        NotOwner: 'The connected wallet is not the owner of this vault.',
+        InvalidLimit: 'The spending limits are invalid. Daily limit must be at least the per-transaction limit.',
+        ZeroAddress: 'A zero address is not allowed.',
+        AgentNotRegistered: 'This agent is no longer registered. Refresh the agent list.',
+        SpendLimitExceeded: 'The requested transfer exceeds an on-chain spending limit.',
+        RecipientNotAllowed: 'This recipient is not approved by the vault owner.',
+        TokenNotAllowed: 'This token is not approved by the vault owner.',
+      };
+      return explanations[decoded.name] || `The vault rejected this action (${decoded.name}).`;
+    } catch { /* Try another nested revert payload or preserve the wallet error. */ }
+  }
+  return error?.shortMessage || error?.reason || error?.message || 'Transaction failed.';
+}
+
 const NAV: { page: Page; icon: React.ReactNode }[] = [
   { page: 'Overview', icon: <Fingerprint /> },
   { page: 'My agents', icon: <Bot /> },
@@ -179,16 +218,8 @@ export default function Home() {
       if (afterConfirm) await afterConfirm();
       notify(success); setBusy(false); setTxPhase('refreshing'); await refresh(); return true;
     } catch (e: any) {
-      let message = e.shortMessage || e.reason || e.message || 'Transaction failed.';
-      let duplicateAgent = message.includes('AgentAlreadyRegistered');
-      const data = e.data || e.info?.error?.data || e.error?.data;
-      if (typeof data === 'string') {
-        try {
-          const decoded = new Contract(vaultAddress || factoryAddress, VAULT_ABI, provider()).interface.parseError(data);
-          const explanations: Record<string, string> = { AgentAlreadyRegistered: 'This address is already registered. Refreshing the existing agent state.', NotOwner: 'The connected wallet is not the owner of this vault.', InvalidLimit: 'The spending limits are invalid. Daily limit must be at least the per-transaction limit.', ZeroAddress: 'A zero address is not allowed.', AgentNotRegistered: 'This agent is no longer registered. Refresh the agent list.', SpendLimitExceeded: 'The requested transfer exceeds an on-chain spending limit.', RecipientNotAllowed: 'This recipient is not approved by the vault owner.', TokenNotAllowed: 'This token is not approved by the vault owner.' };
-          if (decoded) { duplicateAgent ||= decoded.name === 'AgentAlreadyRegistered'; message = explanations[decoded.name] || `The vault rejected this action (${decoded.name}).`; }
-        } catch { /* Keep the wallet's original error when its revert data is not a vault error. */ }
-      }
+      const message = explainVaultError(e, vaultAddress || factoryAddress);
+      const duplicateAgent = message.includes('already registered') || String(e?.message || '').includes('AgentAlreadyRegistered');
       notify(message);
       if (duplicateAgent) { setBusy(false); setTxPhase('refreshing'); setModal(''); await refresh(); }
       return duplicateAgent;
@@ -211,7 +242,7 @@ export default function Home() {
         setRegistrationCheck(false); setModal(''); notify('This agent is already registered. Refreshing its existing on-chain state.'); await refresh(); return true;
       }
     } catch (e: any) {
-      setRegistrationCheck(false); notify(e.shortMessage || e.reason || e.message || 'Agent preflight check failed.'); return;
+      setRegistrationCheck(false); notify(explainVaultError(e, vaultAddress)); return;
     }
     setRegistrationCheck(false);
     return await transact(async () => {
