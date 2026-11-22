@@ -1,9 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BrowserProvider, Contract, formatEther, parseEther, isAddress } from 'ethers';
-import { findVaultCreationBlock, loadAgentHistory, loadVaultHistory, type DiscoveryProgress } from '../sdk/discovery';
-import { preflightAgentRegistration } from '../sdk/agent-registration';
 import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Wallet, X } from 'lucide-react';
 import Landing from './components/Landing';
 import { Brand } from './components/Mark';
@@ -21,8 +19,7 @@ const VAULT_ABI = [
   'function owner() view returns(address)', 'function globallyPaused() view returns(bool)', 'function agents(address) view returns(bool registered,bool paused,uint128 maxNativePerTx,uint128 maxNativePerDay,uint64 dayStart,uint128 nativeSpentToday)',
   'function allowedRecipients(address) view returns(bool)', 'function allowedTokens(address) view returns(bool)', 'function tokenMaxPerTx(address) view returns(uint128)', 'function tokenMaxPerDay(address) view returns(uint128)',
   'function registerAgent(address,uint128,uint128)', 'function setAgentLimits(address,uint128,uint128)', 'function setAgentPaused(address,bool)', 'function revokeAgent(address)', 'function setGlobalPause(bool)', 'function setRecipient(address,bool)', 'function setTokenPolicy(address,bool,uint128,uint128)', 'function ownerWithdrawNative(address payable,uint128)', 'function ownerWithdrawToken(address,address,uint128)',
-  'event AgentRegistered(address indexed agent,uint256 maxNativePerTx,uint256 maxNativePerDay)', 'event AgentStatusChanged(address indexed agent,bool paused)', 'event AgentLimitsChanged(address indexed agent,uint256 maxNativePerTx,uint256 maxNativePerDay)', 'event AgentRevoked(address indexed agent)', 'event RecipientPermissionChanged(address indexed recipient,bool allowed)', 'event TokenPolicyChanged(address indexed token,bool allowed,uint256 maxPerTx,uint256 maxPerDay)', 'event GlobalPauseChanged(bool paused)', 'event NativeTransferExecuted(address indexed agent,address indexed recipient,uint256 amount)', 'event TokenTransferExecuted(address indexed agent,address indexed token,address indexed recipient,uint256 amount)', 'event OwnerWithdrawal(address indexed asset,address indexed recipient,uint256 amount)',
-  'error NotOwner()', 'error NotAgent()', 'error ZeroAddress()', 'error AgentAlreadyRegistered()', 'error AgentNotRegistered()', 'error AgentIsPaused()', 'error InvalidLimit()', 'error RecipientNotAllowed()', 'error TokenNotAllowed()', 'error InvalidToken()', 'error SpendLimitExceeded()', 'error UnsupportedCall()', 'error TransferFailed()',
+  'event AgentRegistered(address indexed agent,uint256 maxNativePerTx,uint256 maxNativePerDay)', 'event AgentStatusChanged(address indexed agent,bool paused)', 'event AgentRevoked(address indexed agent)', 'event RecipientPermissionChanged(address indexed recipient,bool allowed)', 'event TokenPolicyChanged(address indexed token,bool allowed,uint256 maxPerTx,uint256 maxPerDay)', 'event GlobalPauseChanged(bool paused)', 'event NativeTransferExecuted(address indexed agent,address indexed recipient,uint256 amount)', 'event TokenTransferExecuted(address indexed agent,address indexed token,address indexed recipient,uint256 amount)', 'event OwnerWithdrawal(address indexed asset,address indexed recipient,uint256 amount)',
 ];
 const chainId = Number(process.env.NEXT_PUBLIC_RH_CHAIN_ID || process.env.NEXT_PUBLIC_RH_TESTNET_CHAIN_ID || '46630');
 const networkName = process.env.NEXT_PUBLIC_RH_NETWORK_NAME || (chainId === 4663 ? 'MAINNET' : 'TESTNET');
@@ -36,45 +33,6 @@ const ZERO = '0x0000000000000000000000000000000000000000';
 const short = (s: string) => `${s.slice(0, 6)}…${s.slice(-4)}`;
 const money = (n: bigint) => `${Number(formatEther(n)).toFixed(4)} ${SYMBOL}`;
 const explorerBase = explorer.replace(/\/$/, '');
-
-function findRevertData(error: unknown): string[] {
-  const visited = new Set<unknown>();
-  const pending: Array<{ value: unknown; key: string }> = [{ value: error, key: '' }];
-  const candidates: Array<{ data: string; priority: number }> = [];
-  while (pending.length) {
-    const { value, key } = pending.pop()!;
-    if (!value || typeof value !== 'object' || visited.has(value)) continue;
-    visited.add(value);
-    for (const [childKey, child] of Object.entries(value)) {
-      if (typeof child === 'string' && /^0x[0-9a-fA-F]{8,}$/.test(child)) {
-        candidates.push({ data: child, priority: /data|revert|result/i.test(childKey) ? 1 : 0 });
-      } else if (child && typeof child === 'object') pending.push({ value: child, key: childKey || key });
-    }
-  }
-  return [...new Set(candidates.sort((a, b) => b.priority - a.priority).map(candidate => candidate.data))];
-}
-
-function explainVaultError(error: any, contractAddress: string): string {
-  const iface = new Contract(contractAddress, VAULT_ABI, new BrowserProvider(window.ethereum)).interface;
-  for (const rawData of findRevertData(error)) {
-    try {
-      const decoded = iface.parseError(rawData);
-      if (!decoded) continue;
-      const explanations: Record<string, string> = {
-        AgentAlreadyRegistered: 'This address is already registered. Refreshing the existing agent state.',
-        NotOwner: 'The connected wallet is not the owner of this vault.',
-        InvalidLimit: 'The spending limits are invalid. Daily limit must be at least the per-transaction limit.',
-        ZeroAddress: 'A zero address is not allowed.',
-        AgentNotRegistered: 'This agent is no longer registered. Refresh the agent list.',
-        SpendLimitExceeded: 'The requested transfer exceeds an on-chain spending limit.',
-        RecipientNotAllowed: 'This recipient is not approved by the vault owner.',
-        TokenNotAllowed: 'This token is not approved by the vault owner.',
-      };
-      return explanations[decoded.name] || `The vault rejected this action (${decoded.name}).`;
-    } catch { /* Try another nested revert payload or preserve the wallet error. */ }
-  }
-  return error?.shortMessage || error?.reason || error?.message || 'Transaction failed.';
-}
 
 const NAV: { page: Page; icon: React.ReactNode }[] = [
   { page: 'Overview', icon: <Fingerprint /> },
@@ -106,13 +64,6 @@ export default function Home() {
   const [tokens, setTokens] = useState<string[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [busy, setBusy] = useState(false);
-  const [txPhase, setTxPhase] = useState<'idle' | 'wallet' | 'confirmation' | 'refreshing'>('idle');
-  const [dashboardLoading, setDashboardLoading] = useState(false);
-  const [agentDiscoveryLoading, setAgentDiscoveryLoading] = useState(false);
-  const [activityLoading, setActivityLoading] = useState(false);
-  const [registrationCheck, setRegistrationCheck] = useState(false);
-  const [scanProgress, setScanProgress] = useState<DiscoveryProgress | null>(null);
-  const refreshSequence = useRef(0);
   const [toast, setToast] = useState('');
   const [modal, setModal] = useState<Modal>('');
   const [target, setTarget] = useState<Agent | null>(null);
@@ -130,135 +81,52 @@ export default function Home() {
   const provider = useCallback(() => { if (!window.ethereum) throw new Error('Install a browser wallet such as MetaMask first.'); return new BrowserProvider(window.ethereum); }, []);
   const signerContract = useCallback(async (addr: string, abi: string[]) => { const p = provider(); const s = await p.getSigner(); return new Contract(addr, abi, s); }, [provider]);
 
-  const readVault = useCallback(async (vault: string, walletOwner: string, sequence: number) => {
-    const p = provider(); const c = new Contract(vault, VAULT_ABI, p); const factory = new Contract(factoryAddress, FACTORY_ABI, p);
-    const [bal, global, code, liveOwner, registeredVault, latest] = await Promise.all([p.getBalance(vault), c.globallyPaused(), p.getCode(vault), c.owner(), factory.vaultOf(walletOwner), p.getBlockNumber()]);
-    if (sequence !== refreshSequence.current) return;
+  const readVault = useCallback(async (vault: string, owner: string) => {
+    const p = provider(); const c = new Contract(vault, VAULT_ABI, p);
+    const [bal, global, code] = await Promise.all([p.getBalance(vault), c.globallyPaused(), p.getCode(vault)]);
     if (code === '0x') throw new Error('Vault address has no contract code on this network.');
-    if (liveOwner.toLowerCase() !== walletOwner.toLowerCase()) throw new Error('The connected wallet is not the owner of this vault. Reconnect the owner wallet.');
-    if (registeredVault.toLowerCase() !== vault.toLowerCase()) throw new Error('The configured factory does not identify this as the connected owner’s vault.');
     setVaultBalance(formatEther(bal)); setPaused(global);
-    setScanProgress({ phase: 'locating-vault', completed: 0, total: latest + 1 });
-    const creationBlock = await findVaultCreationBlock(p, factoryAddress, walletOwner, vault, latest, setScanProgress);
-    if (sequence !== refreshSequence.current) return;
-
-    setAgentDiscoveryLoading(true);
-    try {
-      const { rows: agentHistory } = await loadAgentHistory(p, vault, creationBlock, latest, setScanProgress);
-      if (sequence !== refreshSequence.current) return;
-      const activeAddresses = new Set<string>();
-      for (const { name, parsed } of agentHistory) {
-        const address = String(parsed.args.agent).toLowerCase();
-        if (name === 'AgentRegistered') activeAddresses.add(address);
-        if (name === 'AgentRevoked') activeAddresses.delete(address);
+    // Some RPC providers reject large historical eth_getLogs ranges. The vault was
+    // deployed recently, so scan a bounded recent window in small chunks instead
+    // of letting one oversized query fail the entire dashboard refresh.
+    const latest = await p.getBlockNumber();
+    const fromBlock = Math.max(0, latest - 10000);
+    const readLogs = async (filter: any) => {
+      const out: any[] = [];
+      for (let start = fromBlock; start <= latest; start += 2000) {
+        const end = Math.min(latest, start + 1999);
+        out.push(...await c.queryFilter(filter, start, end));
       }
-      const liveAgents: Agent[] = [];
-      const candidates = [...activeAddresses];
-      for (let start = 0; start < candidates.length; start += 10) {
-        const batch = await Promise.all(candidates.slice(start, start + 10).map(async address => {
-          const current = await c.agents(address);
-          return current.registered ? { address, registered: current.registered, paused: current.paused, maxNativePerTx: current.maxNativePerTx, maxNativePerDay: current.maxNativePerDay, dayStart: current.dayStart, nativeSpentToday: current.nativeSpentToday } as Agent : null;
-        }));
-        if (sequence !== refreshSequence.current) return;
-        liveAgents.push(...batch.filter((agent): agent is Agent => agent !== null));
-      }
-      if (sequence !== refreshSequence.current) return;
-      setAgents(liveAgents);
-    } finally {
-      if (sequence === refreshSequence.current) setAgentDiscoveryLoading(false);
-    }
+      return out;
+    };
+    const [filterAgents, filterRecipients, filterTokens, filterNative, filterToken, filterWithdraw] = await Promise.all([
+      c.filters.AgentRegistered(), c.filters.RecipientPermissionChanged(), c.filters.TokenPolicyChanged(), c.filters.NativeTransferExecuted(), c.filters.TokenTransferExecuted(), c.filters.OwnerWithdrawal(),
+    ]);
+    const [aLogs, rLogs, tLogs, nLogs, ttLogs, wLogs] = await Promise.all([readLogs(filterAgents), readLogs(filterRecipients), readLogs(filterTokens), readLogs(filterNative), readLogs(filterToken), readLogs(filterWithdraw)]);
+    const agentSet = new Set<string>(); for (const l of aLogs) { const x = (l as any).args?.agent; if (x) agentSet.add(x.toLowerCase()); }
+    const agentRows: Agent[] = []; for (const a of agentSet) { const x = await c.agents(a); if (x.registered) agentRows.push({ address: a, registered: x.registered, paused: x.paused, maxNativePerTx: x.maxNativePerTx, maxNativePerDay: x.maxNativePerDay, dayStart: x.dayStart, nativeSpentToday: x.nativeSpentToday }); }
+    setAgents(agentRows);
+    const rSet = new Set<string>(); for (const l of rLogs) { const x = (l as any).args; if (x?.allowed) rSet.add(x.recipient.toLowerCase()); else if (x?.recipient) rSet.delete(x.recipient.toLowerCase()); } setRecipients([...rSet]);
+    const tSet = new Set<string>(); for (const l of tLogs) { const x = (l as any).args; if (x?.allowed) tSet.add(x.token.toLowerCase()); else if (x?.token) tSet.delete(x.token.toLowerCase()); } setTokens([...tSet]);
+    const rows: EventRow[] = [];
+    for (const l of nLogs) { const x = (l as any).args; rows.push({ title: 'Native transfer executed', detail: `${short(x.agent)} → ${short(x.recipient)} · ${formatEther(x.amount)} ${SYMBOL}`, hash: l.transactionHash, block: l.blockNumber, kind: 'good' }); }
+    for (const l of ttLogs) { const x = (l as any).args; rows.push({ title: 'Token transfer executed', detail: `${short(x.agent)} → ${short(x.recipient)} · token ${short(x.token)}`, hash: l.transactionHash, block: l.blockNumber, kind: 'good' }); }
+    for (const l of wLogs) { const x = (l as any).args; rows.push({ title: 'Owner withdrawal', detail: `${short(x.asset)} → ${short(x.recipient)} · ${x.amount.toString()} units`, hash: l.transactionHash, block: l.blockNumber, kind: 'neutral' }); }
+    rows.sort((a, b) => b.block - a.block); setEvents(rows.slice(0, 100));
+  }, []);
 
-    if (sequence !== refreshSequence.current) return;
-    setActivityLoading(true);
-    try {
-      const { rows: history } = await loadVaultHistory(p, vault, creationBlock, latest, setScanProgress);
-      if (sequence !== refreshSequence.current) return;
-      const recipientPolicy = new Map<string, boolean>();
-      const tokenPolicy = new Map<string, boolean>();
-      const activity: EventRow[] = [];
-      for (const { name, log, parsed } of history) {
-        const args = parsed.args;
-        if (name === 'RecipientPermissionChanged') recipientPolicy.set(String(args.recipient).toLowerCase(), Boolean(args.allowed));
-        if (name === 'TokenPolicyChanged') tokenPolicy.set(String(args.token).toLowerCase(), Boolean(args.allowed));
-        if (name === 'NativeTransferExecuted') activity.push({ title: 'Native transfer executed', detail: `${short(args.agent)} → ${short(args.recipient)} · ${formatEther(args.amount)} ${SYMBOL}`, hash: log.transactionHash, block: log.blockNumber, kind: 'good' });
-        if (name === 'TokenTransferExecuted') activity.push({ title: 'Token transfer executed', detail: `${short(args.agent)} → ${short(args.recipient)} · token ${short(args.token)}`, hash: log.transactionHash, block: log.blockNumber, kind: 'good' });
-        if (name === 'OwnerWithdrawal') activity.push({ title: 'Owner withdrawal', detail: `${short(args.asset)} → ${short(args.recipient)} · ${args.amount.toString()} units`, hash: log.transactionHash, block: log.blockNumber, kind: 'neutral' });
-      }
-      setRecipients([...recipientPolicy].filter(([, allowed]) => allowed).map(([address]) => address));
-      setTokens([...tokenPolicy].filter(([, allowed]) => allowed).map(([address]) => address));
-      setEvents(activity.sort((a, b) => b.block - a.block).slice(0, 100));
-    } finally {
-      if (sequence === refreshSequence.current) setActivityLoading(false);
-    }
-  }, [provider]);
-
-  const refresh = useCallback(async () => {
-    if (!account || !vaultAddress) return;
-    const sequence = ++refreshSequence.current;
-    setDashboardLoading(true); setAgentDiscoveryLoading(true); setActivityLoading(false); setScanProgress(null);
-    try { await readVault(vaultAddress, account, sequence); }
-    catch (e: any) { if (sequence === refreshSequence.current) notify(e.shortMessage || e.message || 'Could not load vault data.'); }
-    finally { if (sequence === refreshSequence.current) { setDashboardLoading(false); setAgentDiscoveryLoading(false); setActivityLoading(false); setScanProgress(null); } }
-  }, [account, vaultAddress, readVault]);
+  const refresh = useCallback(async () => { if (!account || !vaultAddress) return; setBusy(true); try { await readVault(vaultAddress, account); } catch (e: any) { notify(e.shortMessage || e.message || 'Could not load vault.'); } finally { setBusy(false); } }, [account, vaultAddress, readVault]);
   const connect = async () => { try { const p = provider(); const a = await p.send('eth_requestAccounts', []); const net = await p.getNetwork(); setAccount(a[0]); setChain(Number(net.chainId)); } catch (e: any) { notify(e.shortMessage || e.message || 'Wallet connection failed.'); } };
 
-  useEffect(() => { if (!window.ethereum) return; const invalidateRead = () => { refreshSequence.current++; setDashboardLoading(false); setAgentDiscoveryLoading(false); setActivityLoading(false); setScanProgress(null); setAgents([]); setRecipients([]); setTokens([]); setEvents([]); }; const onAccounts = (a: string[]) => { invalidateRead(); setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { invalidateRead(); setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
+  useEffect(() => { if (!window.ethereum) return; const onAccounts = (a: string[]) => { setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
   useEffect(() => { let live = true; (async () => { if (!account || !chain || !factoryAddress || !chainId || chain !== chainId) return; try { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (live && v !== ZERO) setVaultAddress(v); else if (live) setVaultAddress(''); } catch (e: any) { notify('Could not read factory. Check the configured factory address and network.'); } })(); return () => { live = false; }; }, [account, chain, provider]);
   useEffect(() => { if (vaultAddress && account) refresh(); }, [vaultAddress, account, refresh]);
 
   const ensureNetwork = async () => { if (!chainId) throw new Error('Robinhood Chain ID is not configured in this build.'); if (chain !== chainId) { try { await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x' + chainId.toString(16) }] }); } catch { throw new Error(`Switch your wallet to the configured Robinhood Chain network (chain ID ${chainId}).`); } } };
-  const transact = async (fn: () => Promise<any>, success: string, afterConfirm?: () => Promise<void>) => {
-    setBusy(true); setTxPhase('wallet');
-    try {
-      await ensureNetwork();
-      const tx = await fn();
-      notify('Transaction submitted. Waiting for on-chain confirmation…'); setTxPhase('confirmation');
-      const receipt = await tx.wait();
-      if (!receipt || receipt.status !== 1) throw new Error('The transaction was not confirmed successfully.');
-      if (afterConfirm) await afterConfirm();
-      notify(success); setBusy(false); setTxPhase('refreshing'); await refresh(); return true;
-    } catch (e: any) {
-      const message = explainVaultError(e, vaultAddress || factoryAddress);
-      const duplicateAgent = message.includes('already registered') || String(e?.message || '').includes('AgentAlreadyRegistered');
-      notify(message);
-      if (duplicateAgent) { setBusy(false); setTxPhase('refreshing'); setModal(''); await refresh(); }
-      return duplicateAgent;
-    } finally { setBusy(false); setTxPhase('idle'); setRegistrationCheck(false); }
-  };
+  const transact = async (fn: () => Promise<any>, success: string, afterConfirm?: () => Promise<void>) => { setBusy(true); try { await ensureNetwork(); const tx = await fn(); notify('Transaction submitted. Waiting for confirmation…'); await tx.wait(); if (afterConfirm) await afterConfirm(); notify(success); await refresh(); } catch (e: any) { notify(e.shortMessage || e.reason || e.message || 'Transaction failed.'); } finally { setBusy(false); } };
 
   const createVault = () => transact(async () => { if (!isAddress(factoryAddress)) throw new Error('The configured factory address is invalid.'); const p = provider(); const code = await p.getCode(factoryAddress); if (code === '0x') throw new Error(`AgentGuard factory contract was not found on this network. Switch to the configured Robinhood Chain network (chain ID ${chainId}).`); const c = await signerContract(factoryAddress, FACTORY_ABI); return c.createVault(); }, `Protected vault created on Robinhood Chain ${networkName}.`, async () => { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (!isAddress(v) || v === ZERO) throw new Error('Vault creation confirmed, but the factory did not return a vault address. Refresh and check the explorer.'); setVaultAddress(v); });
-  const addAgent = async () => {
-    if (busy || registrationCheck) return;
-    setRegistrationCheck(true);
-    let maxPerTx: bigint; let maxPerDay: bigint;
-    try {
-      if (!isAddress(address)) throw new Error('Enter a valid agent wallet address.');
-      try { maxPerTx = parseEther(perTx); maxPerDay = parseEther(perDay); } catch { throw new Error(`Enter valid ${SYMBOL} amounts for both spending limits.`); }
-      if (maxPerTx <= 0n || maxPerDay < maxPerTx) throw new Error('Daily limit must be greater than or equal to the per-transaction limit, and both must be above zero.');
-      await ensureNetwork();
-      const c = new Contract(vaultAddress, VAULT_ABI, provider());
-      const result = await preflightAgentRegistration(c, account, address, maxPerTx, maxPerDay);
-      if (result === 'already-registered') {
-        setRegistrationCheck(false); setModal(''); notify('This agent is already registered. Refreshing its existing on-chain state.'); await refresh(); return true;
-      }
-    } catch (e: any) {
-      setRegistrationCheck(false); notify(explainVaultError(e, vaultAddress)); return;
-    }
-    setRegistrationCheck(false);
-    return await transact(async () => {
-      const c = await signerContract(vaultAddress, VAULT_ABI);
-      const [liveOwner, current] = await Promise.all([c.owner(), c.agents(address)]);
-      if (liveOwner.toLowerCase() !== account.toLowerCase()) throw new Error('The connected wallet is not the live owner of this vault. Reconnect the owner wallet.');
-      if (current.registered) throw new Error('AgentAlreadyRegistered');
-      await c.registerAgent.staticCall(address, maxPerTx, maxPerDay);
-      return c.registerAgent(address, maxPerTx, maxPerDay);
-    }, 'Agent registered on-chain.', async () => {
-      const c = new Contract(vaultAddress, VAULT_ABI, provider());
-      const [ownerNow, agentNow] = await Promise.all([c.owner(), c.agents(address)]);
-      if (ownerNow.toLowerCase() !== account.toLowerCase()) throw new Error('The vault owner changed before the registration was confirmed.');
-      if (!agentNow.registered) throw new Error('Registration transaction confirmed, but the agent mapping did not update. Refresh and check the explorer.');
-    });
-  };
+  const addAgent = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid agent wallet address.'); if (parseEther(perTx) <= 0n || parseEther(perDay) < parseEther(perTx)) throw new Error('Daily limit must be greater than or equal to the per-transaction limit, and both must be above zero.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.registerAgent(address, parseEther(perTx), parseEther(perDay)); }, 'Agent registered on-chain.', async () => { const c = new Contract(vaultAddress, VAULT_ABI, provider()); const a = await c.agents(address); if (!a.registered) throw new Error('Registration transaction confirmed, but the agent mapping did not update. Refresh and check the explorer.'); });
   const addRecipient = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid recipient address.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.setRecipient(address, true); }, 'Recipient allowlisted on-chain.');
   const addToken = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid token contract address.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.setTokenPolicy(address, true, BigInt(tokenTx), BigInt(tokenDay)); }, 'Token policy saved on-chain.');
   const fund = () => transact(async () => { const s = await provider().getSigner(); return s.sendTransaction({ to: vaultAddress, value: parseEther(amount) }); }, 'Vault funded.');
@@ -278,7 +146,7 @@ export default function Home() {
   const filteredAgents = useMemo(() => agents.filter(a => a.address.toLowerCase().includes(search.toLowerCase())), [agents, search]);
   const modalClose = () => { if (modal === 'limits') { setPerTx('0.01'); setPerDay('0.05'); } setModal(''); setTarget(null); setAddress(''); setAmount(''); setRecipient(''); };
   const submitModal = async () => {
-    if (modal === 'agent' && !(await addAgent())) return;
+    if (modal === 'agent') await addAgent();
     if (modal === 'recipient') await addRecipient();
     if (modal === 'token') await addToken();
     if (modal === 'fund') await fund();
@@ -342,9 +210,6 @@ export default function Home() {
         </header>
 
         {warning && <div className="warning"><CircleAlert size={17} /> {warning}</div>}
-        {dashboardLoading && !agentDiscoveryLoading && !activityLoading && !scanProgress && <div className="notice" role="status" aria-live="polite"><RefreshCw size={16} className="spin" /><div><b>Refreshing vault dashboard</b><p>Checking current contract state and owner permissions.</p></div></div>}
-        {agentDiscoveryLoading && <div className="notice" role="status" aria-live="polite"><RefreshCw size={16} className="spin" /><div><b>{scanProgress?.phase === 'locating-vault' ? 'Locating vault creation event' : 'Discovering registered agents'}</b><p>{scanProgress?.phase === 'locating-vault' ? 'Searching factory events for this exact owner and vault address.' : 'Reading registration and revocation events, then verifying each agent against the live vault mapping.'} Transaction actions remain available during discovery.</p></div></div>}
-        {activityLoading && <div className="notice" role="status" aria-live="polite"><RefreshCw size={16} className="spin" /><div><b>Loading complete on-chain activity</b><p>Reading policy and transfer history from vault creation in RPC-sized ranges. Agent discovery and transaction controls remain independent.</p></div></div>}
 
         {!vaultAddress ? (
           <section className="create">
@@ -393,7 +258,7 @@ export default function Home() {
                     <h2>Your agents, under control.</h2>
                     <p>Every permission is enforced by the vault contract, not this dashboard.</p>
                   </div>
-                  <button className="btn btn-ghost btn-sm" disabled={dashboardLoading} onClick={refresh}><RefreshCw size={14} className={dashboardLoading ? 'spin' : ''} /> Refresh</button>
+                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={refresh}><RefreshCw size={14} className={busy ? 'spin' : ''} /> Refresh</button>
                 </div>
                 <dl className="stats">
                   <div><dt>Registered agents</dt><dd>{agents.length}</dd></div>
@@ -465,7 +330,7 @@ export default function Home() {
               <section className="panel">
                 <div className="panel-head">
                   <div><h3>Vault event history</h3><p>Transfer and withdrawal events read from the vault contract.</p></div>
-                  <button className="btn btn-ghost btn-sm" disabled={dashboardLoading} onClick={refresh}><RefreshCw size={14} className={dashboardLoading ? 'spin' : ''} /> Refresh</button>
+                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={refresh}><RefreshCw size={14} className={busy ? 'spin' : ''} /> Refresh</button>
                 </div>
                 <EventList rows={events} />
               </section>
@@ -534,8 +399,8 @@ export default function Home() {
               </>
             )}
 
-            <button className={`btn ${modal === 'revoke' ? 'btn-stop-solid' : 'btn-primary'} modal-submit`} disabled={busy || registrationCheck} onClick={submitModal}>
-              {registrationCheck ? 'Checking owner and agent status…' : busy && txPhase === 'confirmation' ? 'Waiting for on-chain confirmation…' : busy && txPhase === 'refreshing' ? 'Refreshing on-chain state…' : busy ? 'Waiting for wallet…' : modal === 'revoke' ? 'Revoke agent on-chain' : 'Confirm on-chain transaction'}
+            <button className={`btn ${modal === 'revoke' ? 'btn-stop-solid' : 'btn-primary'} modal-submit`} disabled={busy} onClick={submitModal}>
+              {busy ? 'Waiting for wallet…' : modal === 'revoke' ? 'Revoke agent on-chain' : 'Confirm on-chain transaction'}
             </button>
             <small className="help">Your wallet will ask you to review and sign this transaction.</small>
           </div>

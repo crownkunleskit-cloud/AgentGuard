@@ -14,10 +14,9 @@ No Solidity source, deployed contract, factory address, or deployment configurat
 was changed. No .env file is included.
 
 Verification:
-- TypeScript check (`npx tsc --noEmit`) passed.
-- Contract test suite (`npm run contracts:test`) passed: 14 tests.
-- Wallet-based registration against a live deployed vault was not available in this
-  environment, so verify the specific network and vault configuration before deployment.
+- A fresh npm build/test could not be completed in this environment because npm ci
+  timed out. Run npm ci, npm run contracts:compile, npm run contracts:test, and npm run
+  build locally before deploying.
 - This frontend patch cannot make a duplicate address register twice: the deployed
   contract correctly rejects duplicate agent addresses. It supports multiple distinct
   agent wallets, subject to the vault owner and valid limits.

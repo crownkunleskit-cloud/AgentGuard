@@ -1,8 +1,5 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
-import type { Contract, Provider } from 'ethers';
-import { preflightAgentRegistration } from '../sdk/agent-registration';
-import { findVaultCreationBlock, loadAgentHistory, withTimeout } from '../sdk/discovery';
 
 describe('AgentGuard V1', function () {
   async function fixture() {
@@ -22,67 +19,6 @@ describe('AgentGuard V1', function () {
     await expect(factory.createVault()).to.emit(factory, 'VaultCreated');
     expect(await factory.vaultOf(owner.address)).not.to.equal(ethers.ZeroAddress);
     await expect(factory.createVault()).to.be.revertedWithCustomError(factory, 'VaultAlreadyExists');
-  });
-
-  it('discovers active agents from each vault with adaptive RPC paging and preflights duplicates', async function () {
-    const [owner, agent, revokedAgent, otherOwner, otherAgent] = await ethers.getSigners();
-    const Factory = await ethers.getContractFactory('AgentGuardFactory');
-    const factory = await Factory.deploy();
-    await factory.waitForDeployment();
-    const creationReceipt = await (await factory.createVault()).wait();
-    const vaultAddress = await factory.vaultOf(owner.address);
-    const vault = await ethers.getContractAt('AgentGuardVault', vaultAddress);
-    await vault.registerAgent(agent.address, 100n, 1000n);
-    await vault.registerAgent(revokedAgent.address, 100n, 1000n);
-    await vault.revokeAgent(revokedAgent.address);
-
-    const historicalAddresses: string[] = [];
-    for (let index = 0; index < 20; index++) {
-      const historicalAddress = ethers.getAddress(`0x${(index + 1000).toString(16).padStart(40, '0')}`);
-      historicalAddresses.push(historicalAddress);
-      await vault.registerAgent(historicalAddress, 100n, 1000n);
-      if (index % 2 === 0) await vault.revokeAgent(historicalAddress);
-    }
-
-    await factory.connect(otherOwner).createVault();
-    const otherVault = await ethers.getContractAt('AgentGuardVault', await factory.vaultOf(otherOwner.address));
-    await otherVault.connect(otherOwner).registerAgent(otherAgent.address, 100n, 1000n);
-
-    let rangeFailures = 0;
-    const limitedProvider = {
-      getLogs: async (filter: any) => {
-        if (Number(filter.toBlock) - Number(filter.fromBlock) > 4) {
-          rangeFailures++;
-          throw new Error('block range limit');
-        }
-        return ethers.provider.getLogs(filter);
-      },
-    } as unknown as Provider;
-    const latestBlock = await ethers.provider.getBlockNumber();
-    const creationBlock = await findVaultCreationBlock(limitedProvider, await factory.getAddress(), owner.address, vaultAddress, latestBlock);
-    expect(creationBlock).to.equal(creationReceipt?.blockNumber);
-
-    const { rows } = await loadAgentHistory(limitedProvider, vaultAddress, creationBlock, latestBlock);
-    const active = new Set<string>();
-    for (const { name, parsed } of rows) {
-      const address = String(parsed.args.agent).toLowerCase();
-      if (name === 'AgentRegistered') active.add(address);
-      if (name === 'AgentRevoked') active.delete(address);
-    }
-    const expectedActive = [agent.address, ...historicalAddresses.filter((_, index) => index % 2 === 1)].map((address) => address.toLowerCase()).sort();
-    expect([...active].sort()).to.deep.equal(expectedActive);
-    expect(rows.length).to.be.greaterThan(30);
-    expect((await vault.agents(agent.address)).registered).to.equal(true);
-    expect((await vault.agents(revokedAgent.address)).registered).to.equal(false);
-    expect((await otherVault.agents(otherAgent.address)).registered).to.equal(true);
-    expect(await preflightAgentRegistration(vault as unknown as Contract, owner.address, agent.address, 100n, 1000n)).to.equal('already-registered');
-    expect(await preflightAgentRegistration(vault as unknown as Contract, owner.address, revokedAgent.address, 100n, 1000n)).to.equal('ready');
-    expect(rangeFailures).to.be.greaterThan(0);
-  });
-
-  it('bounds a stalled RPC request with a timeout', async function () {
-    const stalledRequest = new Promise<never>(() => {});
-    await expect(withTimeout(stalledRequest, 5)).to.be.rejectedWith('RPC log request timed out');
   });
 
   it('registers an agent and permits an approved native transfer within limits', async function () {
