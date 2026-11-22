@@ -1,15 +1,17 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BrowserProvider, Contract, formatEther, parseEther, isAddress } from 'ethers';
+import { BrowserProvider, Contract, Interface, JsonRpcProvider, formatEther, parseEther, isAddress, zeroPadValue } from 'ethers';
 import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Wallet, X } from 'lucide-react';
 import Landing from './components/Landing';
 import { Brand } from './components/Mark';
+import { blockscoutSource, scanLogs, type LogSource, type RawLog } from './lib/logScan';
 
 declare global { interface Window { ethereum?: any } }
 
 type Agent = { address: string; registered: boolean; paused: boolean; maxNativePerTx: bigint; maxNativePerDay: bigint; dayStart: bigint; nativeSpentToday: bigint };
 type EventRow = { title: string; detail: string; hash: string; block: number; kind: 'good' | 'bad' | 'neutral' };
+type AgentsState = 'loading' | 'ok' | 'error';
 type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Settings';
 type Modal = 'agent' | 'recipient' | 'token' | 'fund' | 'withdraw' | 'limits' | 'revoke' | '';
 
@@ -29,6 +31,9 @@ const explorer = process.env.NEXT_PUBLIC_RH_EXPLORER_URL || (chainId === 4663 ? 
 // Display label for the chain's native coin. Presentation only.
 const SYMBOL = process.env.NEXT_PUBLIC_RH_NATIVE_SYMBOL || 'ETH';
 const ZERO = '0x0000000000000000000000000000000000000000';
+// Read-only RPC used to scan vault event history. Defaults are the public endpoints already listed in hardhat.config.ts.
+const READ_RPC = process.env.NEXT_PUBLIC_RH_RPC_URL || (chainId === 4663 ? 'https://rpc.mainnet.chain.robinhood.com' : chainId === 46630 ? 'https://rpc.testnet.chain.robinhood.com' : '');
+const vaultIface = new Interface(VAULT_ABI);
 
 const short = (s: string) => `${s.slice(0, 6)}…${s.slice(-4)}`;
 const money = (n: bigint) => `${Number(formatEther(n)).toFixed(4)} ${SYMBOL}`;
@@ -60,6 +65,8 @@ export default function Home() {
   const [vaultBalance, setVaultBalance] = useState('0');
   const [paused, setPaused] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentsState, setAgentsState] = useState<AgentsState>('loading');
+  const [agentsError, setAgentsError] = useState('');
   const [recipients, setRecipients] = useState<string[]>([]);
   const [tokens, setTokens] = useState<string[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
@@ -86,26 +93,40 @@ export default function Home() {
     const [bal, global, code] = await Promise.all([p.getBalance(vault), c.globallyPaused(), p.getCode(vault)]);
     if (code === '0x') throw new Error('Vault address has no contract code on this network.');
     setVaultBalance(formatEther(bal)); setPaused(global);
-    // Some RPC providers reject large historical eth_getLogs ranges. The vault was
-    // deployed recently, so scan a bounded recent window in small chunks instead
-    // of letting one oversized query fail the entire dashboard refresh.
-    const latest = await p.getBlockNumber();
-    const fromBlock = Math.max(0, latest - 10000);
-    const readLogs = async (filter: any) => {
-      const out: any[] = [];
-      for (let start = fromBlock; start <= latest; start += 2000) {
-        const end = Math.min(latest, start + 1999);
-        out.push(...await c.queryFilter(filter, start, end));
+    // Registered agents are not enumerable on-chain, so they are discovered from the vault's AgentRegistered
+    // events. The whole history is scanned (from the block the vault was created in), never a fixed recent
+    // window, and a failed query is reported as an error instead of being shown as "no agents".
+    const sources: LogSource[] = [];
+    const rpcSource = (name: string, prov: { getBlockNumber(): Promise<number>; getLogs(f: any): Promise<readonly any[]> }): LogSource => ({
+      name,
+      getLatest: () => prov.getBlockNumber(),
+      getLogs: async (address, topics, from, to) => (await prov.getLogs({ address, topics, fromBlock: from, toBlock: to })).map((l: any): RawLog => ({ blockNumber: l.blockNumber, index: l.index, transactionHash: l.transactionHash, topics: [...l.topics], data: l.data })),
+    });
+    if (READ_RPC) sources.push(rpcSource('public RPC', new JsonRpcProvider(READ_RPC, chainId, { staticNetwork: true })));
+    sources.push(rpcSource('wallet RPC', p));
+    if (explorerBase) sources.push(blockscoutSource(explorerBase));
+    // The factory's VaultCreated(owner, vault) event gives the vault's creation block; nothing earlier can contain vault events.
+    let startBlock = 0;
+    try {
+      if (isAddress(factoryAddress)) {
+        const created = await scanLogs(sources, factoryAddress, [new Interface(FACTORY_ABI).getEvent('VaultCreated')!.topicHash, zeroPadValue(owner, 32).toLowerCase(), zeroPadValue(vault, 32).toLowerCase()], 0);
+        if (created.length) startBlock = created[0].blockNumber;
       }
-      return out;
-    };
-    const [filterAgents, filterRecipients, filterTokens, filterNative, filterToken, filterWithdraw] = await Promise.all([
-      c.filters.AgentRegistered(), c.filters.RecipientPermissionChanged(), c.filters.TokenPolicyChanged(), c.filters.NativeTransferExecuted(), c.filters.TokenTransferExecuted(), c.filters.OwnerWithdrawal(),
-    ]);
-    const [aLogs, rLogs, tLogs, nLogs, ttLogs, wLogs] = await Promise.all([readLogs(filterAgents), readLogs(filterRecipients), readLogs(filterTokens), readLogs(filterNative), readLogs(filterToken), readLogs(filterWithdraw)]);
-    const agentSet = new Set<string>(); for (const l of aLogs) { const x = (l as any).args?.agent; if (x) agentSet.add(x.toLowerCase()); }
-    const agentRows: Agent[] = []; for (const a of agentSet) { const x = await c.agents(a); if (x.registered) agentRows.push({ address: a, registered: x.registered, paused: x.paused, maxNativePerTx: x.maxNativePerTx, maxNativePerDay: x.maxNativePerDay, dayStart: x.dayStart, nativeSpentToday: x.nativeSpentToday }); }
-    setAgents(agentRows);
+    } catch { startBlock = 0; }
+    const readLogs = async (name: string) => (await scanLogs(sources, vault, [vaultIface.getEvent(name)!.topicHash], startBlock)).map(l => ({ args: vaultIface.parseLog({ topics: l.topics, data: l.data })!.args, transactionHash: l.transactionHash, blockNumber: l.blockNumber }));
+
+    try {
+      const aLogs = await readLogs('AgentRegistered');
+      const agentSet = new Set<string>(); for (const l of aLogs) { const x = (l as any).args?.agent; if (x) agentSet.add(x.toLowerCase()); }
+      // Every discovered address is checked against the live agents(address) mapping (source of truth). A failed read throws.
+      const checked = await Promise.all([...agentSet].map(async a => ({ a, x: await c.agents(a) })));
+      const agentRows: Agent[] = checked.filter(({ x }) => x.registered).map(({ a, x }) => ({ address: a, registered: x.registered, paused: x.paused, maxNativePerTx: x.maxNativePerTx, maxNativePerDay: x.maxNativePerDay, dayStart: x.dayStart, nativeSpentToday: x.nativeSpentToday }));
+      setAgents(agentRows); setAgentsState('ok'); setAgentsError('');
+    } catch (e: any) {
+      setAgentsState('error'); setAgentsError(e.shortMessage || e.message || 'Could not read registered agents.');
+      throw e;
+    }
+    const [rLogs, tLogs, nLogs, ttLogs, wLogs] = await Promise.all([readLogs('RecipientPermissionChanged'), readLogs('TokenPolicyChanged'), readLogs('NativeTransferExecuted'), readLogs('TokenTransferExecuted'), readLogs('OwnerWithdrawal')]);
     const rSet = new Set<string>(); for (const l of rLogs) { const x = (l as any).args; if (x?.allowed) rSet.add(x.recipient.toLowerCase()); else if (x?.recipient) rSet.delete(x.recipient.toLowerCase()); } setRecipients([...rSet]);
     const tSet = new Set<string>(); for (const l of tLogs) { const x = (l as any).args; if (x?.allowed) tSet.add(x.token.toLowerCase()); else if (x?.token) tSet.delete(x.token.toLowerCase()); } setTokens([...tSet]);
     const rows: EventRow[] = [];
@@ -115,18 +136,19 @@ export default function Home() {
     rows.sort((a, b) => b.block - a.block); setEvents(rows.slice(0, 100));
   }, []);
 
-  const refresh = useCallback(async () => { if (!account || !vaultAddress) return; setBusy(true); try { await readVault(vaultAddress, account); } catch (e: any) { notify(e.shortMessage || e.message || 'Could not load vault.'); } finally { setBusy(false); } }, [account, vaultAddress, readVault]);
+  const refresh = useCallback(async () => { if (!account || !vaultAddress) return; setBusy(true); setAgentsState(st => (st === 'ok' ? st : 'loading')); try { await readVault(vaultAddress, account); } catch (e: any) { notify(e.shortMessage || e.message || 'Could not load vault.'); } finally { setBusy(false); } }, [account, vaultAddress, readVault]);
   const connect = async () => { try { const p = provider(); const a = await p.send('eth_requestAccounts', []); const net = await p.getNetwork(); setAccount(a[0]); setChain(Number(net.chainId)); } catch (e: any) { notify(e.shortMessage || e.message || 'Wallet connection failed.'); } };
 
   useEffect(() => { if (!window.ethereum) return; const onAccounts = (a: string[]) => { setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
   useEffect(() => { let live = true; (async () => { if (!account || !chain || !factoryAddress || !chainId || chain !== chainId) return; try { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (live && v !== ZERO) setVaultAddress(v); else if (live) setVaultAddress(''); } catch (e: any) { notify('Could not read factory. Check the configured factory address and network.'); } })(); return () => { live = false; }; }, [account, chain, provider]);
+  useEffect(() => { setAgents([]); setAgentsState('loading'); setAgentsError(''); }, [vaultAddress]);
   useEffect(() => { if (vaultAddress && account) refresh(); }, [vaultAddress, account, refresh]);
 
   const ensureNetwork = async () => { if (!chainId) throw new Error('Robinhood Chain ID is not configured in this build.'); if (chain !== chainId) { try { await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x' + chainId.toString(16) }] }); } catch { throw new Error(`Switch your wallet to the configured Robinhood Chain network (chain ID ${chainId}).`); } } };
   const transact = async (fn: () => Promise<any>, success: string, afterConfirm?: () => Promise<void>) => { setBusy(true); try { await ensureNetwork(); const tx = await fn(); notify('Transaction submitted. Waiting for confirmation…'); await tx.wait(); if (afterConfirm) await afterConfirm(); notify(success); await refresh(); } catch (e: any) { notify(e.shortMessage || e.reason || e.message || 'Transaction failed.'); } finally { setBusy(false); } };
 
   const createVault = () => transact(async () => { if (!isAddress(factoryAddress)) throw new Error('The configured factory address is invalid.'); const p = provider(); const code = await p.getCode(factoryAddress); if (code === '0x') throw new Error(`AgentGuard factory contract was not found on this network. Switch to the configured Robinhood Chain network (chain ID ${chainId}).`); const c = await signerContract(factoryAddress, FACTORY_ABI); return c.createVault(); }, `Protected vault created on Robinhood Chain ${networkName}.`, async () => { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (!isAddress(v) || v === ZERO) throw new Error('Vault creation confirmed, but the factory did not return a vault address. Refresh and check the explorer.'); setVaultAddress(v); });
-  const addAgent = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid agent wallet address.'); if (parseEther(perTx) <= 0n || parseEther(perDay) < parseEther(perTx)) throw new Error('Daily limit must be greater than or equal to the per-transaction limit, and both must be above zero.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.registerAgent(address, parseEther(perTx), parseEther(perDay)); }, 'Agent registered on-chain.', async () => { const c = new Contract(vaultAddress, VAULT_ABI, provider()); const a = await c.agents(address); if (!a.registered) throw new Error('Registration transaction confirmed, but the agent mapping did not update. Refresh and check the explorer.'); });
+  const addAgent = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid agent wallet address.'); if (parseEther(perTx) <= 0n || parseEther(perDay) < parseEther(perTx)) throw new Error('Daily limit must be greater than or equal to the per-transaction limit, and both must be above zero.'); const existing = await new Contract(vaultAddress, VAULT_ABI, provider()).agents(address); if (existing.registered) { refresh(); throw new Error('This agent wallet is already registered in your vault. No transaction was sent.'); } const c = await signerContract(vaultAddress, VAULT_ABI); return c.registerAgent(address, parseEther(perTx), parseEther(perDay)); }, 'Agent registered on-chain.', async () => { const c = new Contract(vaultAddress, VAULT_ABI, provider()); const a = await c.agents(address); if (!a.registered) throw new Error('Registration transaction confirmed, but the agent mapping did not update. Refresh and check the explorer.'); setAgents(prev => prev.some(x => x.address === address.toLowerCase()) ? prev : [...prev, { address: address.toLowerCase(), registered: a.registered, paused: a.paused, maxNativePerTx: a.maxNativePerTx, maxNativePerDay: a.maxNativePerDay, dayStart: a.dayStart, nativeSpentToday: a.nativeSpentToday }]); });
   const addRecipient = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid recipient address.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.setRecipient(address, true); }, 'Recipient allowlisted on-chain.');
   const addToken = () => transact(async () => { if (!isAddress(address)) throw new Error('Enter a valid token contract address.'); const c = await signerContract(vaultAddress, VAULT_ABI); return c.setTokenPolicy(address, true, BigInt(tokenTx), BigInt(tokenDay)); }, 'Token policy saved on-chain.');
   const fund = () => transact(async () => { const s = await provider().getSigner(); return s.sendTransaction({ to: vaultAddress, value: parseEther(amount) }); }, 'Vault funded.');
@@ -261,7 +283,7 @@ export default function Home() {
                   <button className="btn btn-ghost btn-sm" disabled={busy} onClick={refresh}><RefreshCw size={14} className={busy ? 'spin' : ''} /> Refresh</button>
                 </div>
                 <dl className="stats">
-                  <div><dt>Registered agents</dt><dd>{agents.length}</dd></div>
+                  <div><dt>Registered agents</dt><dd>{agentsState === 'ok' || agents.length ? agents.length : agentsState === 'loading' ? '…' : '—'}</dd></div>
                   <div><dt>Approved recipients</dt><dd>{recipients.length}</dd></div>
                   <div><dt>Approved tokens</dt><dd>{tokens.length}</dd></div>
                   <div><dt>Recorded transfers</dt><dd>{events.length}</dd></div>
@@ -271,7 +293,7 @@ export default function Home() {
                     <div><h3>Registered agents</h3><p>Only these addresses can call protected transfer functions.</p></div>
                     <button className="btn btn-primary btn-sm" onClick={() => setModal('agent')}><Plus size={15} /> Register agent</button>
                   </div>
-                  <AgentTable rows={agents.slice(0, 5)} onToggle={toggleAgent} onRevoke={revokeAgent} onEdit={editAgentLimits} busy={busy} />
+                  <AgentTable status={agentsState} error={agentsError} onRetry={refresh} rows={agents.slice(0, 5)} onToggle={toggleAgent} onRevoke={revokeAgent} onEdit={editAgentLimits} busy={busy} />
                 </section>
                 <section className="panel">
                   <div className="panel-head">
@@ -290,7 +312,7 @@ export default function Home() {
                   <button className="btn btn-primary btn-sm" onClick={() => setModal('agent')}><Plus size={15} /> Register agent</button>
                 </div>
                 <input className="search" id="agent-search" aria-label="Search wallet address" placeholder="Search wallet address" value={search} onChange={e => setSearch(e.target.value)} />
-                <AgentTable rows={filteredAgents} onToggle={toggleAgent} onRevoke={revokeAgent} onEdit={editAgentLimits} busy={busy} />
+                <AgentTable status={agentsState} error={agentsError} onRetry={refresh} rows={filteredAgents} onToggle={toggleAgent} onRevoke={revokeAgent} onEdit={editAgentLimits} busy={busy} />
               </section>
             )}
 
@@ -410,7 +432,7 @@ export default function Home() {
   );
 }
 
-function AgentTable({ rows, onToggle, onRevoke, onEdit, busy }: { rows: Agent[]; onToggle: (a: Agent) => void; onRevoke: (a: Agent) => void; onEdit: (a: Agent) => void; busy: boolean }) {
+function AgentTable({ rows, status, error, onRetry, onToggle, onRevoke, onEdit, busy }: { rows: Agent[]; status: AgentsState; error: string; onRetry: () => void; onToggle: (a: Agent) => void; onRevoke: (a: Agent) => void; onEdit: (a: Agent) => void; busy: boolean }) {
   return (
     <div className="tbl-wrap">
       <table className="tbl">
@@ -435,7 +457,9 @@ function AgentTable({ rows, onToggle, onRevoke, onEdit, busy }: { rows: Agent[];
           })}
         </tbody>
       </table>
-      {!rows.length && <p className="empty">No agents registered in this vault yet.</p>}
+      {!rows.length && status === 'loading' && <p className="empty">Loading registered agents from the vault…</p>}
+      {!rows.length && status === 'error' && <p className="empty">Could not load registered agents ({error}). This is a loading problem, not an empty vault. <button className="link" onClick={onRetry}>Retry</button></p>}
+      {!rows.length && status === 'ok' && <p className="empty">No agents registered in this vault yet.</p>}
     </div>
   );
 }
