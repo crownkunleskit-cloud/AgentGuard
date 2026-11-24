@@ -411,3 +411,10 @@ input::placeholder { color: var(--dim); }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Activity & Security Logs */
+.log-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.log-body { min-width: 0; }
+.event .log-body b { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.event .log-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
+.event .log-meta a { color: inherit; }

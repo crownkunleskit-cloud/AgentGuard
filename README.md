@@ -101,3 +101,13 @@ NEXT_PUBLIC_RH_EXPLORER_URL=https://robinhoodchain.blockscout.com
 ```
 
 Do not switch the frontend to mainnet before the factory is deployed and verified. Until then, keep the existing testnet defaults. The current source has not been independently audited, and these deployment safeguards do not constitute an audit or guarantee of security.
+
+## Activity & Security Logs
+
+The dashboard's **Activity** page (titled "Activity & Security Logs") lists everything the connected vault has emitted, newest first, with filters (All, Transactions, Agent activity, Security events) and search by wallet address or transaction hash. Nothing is stored in the browser: each load reads the vault's full event history from chain (from the block the vault was created in, located through the factory's `VaultCreated` event), using the public RPC, then the wallet RPC, then the block-explorer API, with automatic block-range narrowing when a node limits `eth_getLogs`. Entries are de-duplicated by transaction hash and log index.
+
+Supported by the deployed V1 contracts (real events): agent registered / revoked / paused / resumed / limits changed; native and ERC-20 transfers executed; recipient added / removed; token permission added / removed; emergency pause on / off; owner withdrawals.
+
+Not emitted by the V1 contracts, so NOT tracked as events: transaction requests (V1 has no request flow), ownership changes (the owner is immutable), and rejected calls. Reverted transactions emit no events; the page additionally asks the block explorer's transaction list for reverted transactions sent to the vault and shows them as "Failed" / "Blocked agent transfer" when the explorer returns them. Their revert reason is not decoded, and if the explorer is unreachable the page says so instead of implying there were none.
+
+No contract, deployment or environment-variable changes are needed.

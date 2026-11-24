@@ -1,17 +1,19 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserProvider, Contract, Interface, JsonRpcProvider, formatEther, parseEther, isAddress, zeroPadValue } from 'ethers';
 import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Wallet, X } from 'lucide-react';
 import Landing from './components/Landing';
 import { Brand } from './components/Mark';
 import { blockscoutSource, scanLogs, type LogSource, type RawLog } from './lib/logScan';
+import { buildEntries, fetchFailedTxs, filterEntries, type FailedTx, type LogEntry, type LogFilter, type ParsedLog } from './lib/activityLog';
 
 declare global { interface Window { ethereum?: any } }
 
 type Agent = { address: string; registered: boolean; paused: boolean; maxNativePerTx: bigint; maxNativePerDay: bigint; dayStart: bigint; nativeSpentToday: bigint };
 type EventRow = { title: string; detail: string; hash: string; block: number; kind: 'good' | 'bad' | 'neutral' };
 type AgentsState = 'loading' | 'ok' | 'error';
+const LOG_FILTERS: { id: LogFilter; label: string }[] = [{ id: 'all', label: 'All activity' }, { id: 'transaction', label: 'Transactions' }, { id: 'agent', label: 'Agent activity' }, { id: 'security', label: 'Security events' }];
 type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Settings';
 type Modal = 'agent' | 'recipient' | 'token' | 'fund' | 'withdraw' | 'limits' | 'revoke' | '';
 
@@ -35,6 +37,12 @@ const ZERO = '0x0000000000000000000000000000000000000000';
 const READ_RPC = process.env.NEXT_PUBLIC_RH_RPC_URL || (chainId === 4663 ? 'https://rpc.mainnet.chain.robinhood.com' : chainId === 46630 ? 'https://rpc.testnet.chain.robinhood.com' : '');
 const vaultIface = new Interface(VAULT_ABI);
 
+// Activity & Security Logs helpers (the registered-agent discovery in readVault is unchanged and keeps its own copy of this setup).
+const rpcLogSource = (name: string, prov: { getBlockNumber(): Promise<number>; getLogs(f: any): Promise<readonly any[]> }): LogSource => ({
+  name,
+  getLatest: () => prov.getBlockNumber(),
+  getLogs: async (address, topics, from, to) => (await prov.getLogs({ address, topics, fromBlock: from, toBlock: to })).map((l: any): RawLog => ({ blockNumber: l.blockNumber, index: l.index, transactionHash: l.transactionHash, topics: [...l.topics], data: l.data })),
+});
 const short = (s: string) => `${s.slice(0, 6)}…${s.slice(-4)}`;
 const money = (n: bigint) => `${Number(formatEther(n)).toFixed(4)} ${SYMBOL}`;
 const explorerBase = explorer.replace(/\/$/, '');
@@ -65,6 +73,14 @@ export default function Home() {
   const [vaultBalance, setVaultBalance] = useState('0');
   const [paused, setPaused] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logsState, setLogsState] = useState<AgentsState>('loading');
+  const [logsError, setLogsError] = useState('');
+  const [logsNote, setLogsNote] = useState('');
+  const [logFilter, setLogFilter] = useState<LogFilter>('all');
+  const [logQuery, setLogQuery] = useState('');
+  const [logLimit, setLogLimit] = useState(100);
+  const logsVault = useRef('');
   const [agentsState, setAgentsState] = useState<AgentsState>('loading');
   const [agentsError, setAgentsError] = useState('');
   const [recipients, setRecipients] = useState<string[]>([]);
@@ -137,10 +153,47 @@ export default function Home() {
   }, []);
 
   const refresh = useCallback(async () => { if (!account || !vaultAddress) return; setBusy(true); setAgentsState(st => (st === 'ok' ? st : 'loading')); try { await readVault(vaultAddress, account); } catch (e: any) { notify(e.shortMessage || e.message || 'Could not load vault.'); } finally { setBusy(false); } }, [account, vaultAddress, readVault]);
+  // Activity & Security Logs: read from the connected vault's real event history (whole history, from the block the vault was created in).
+  const loadLogs = useCallback(async () => {
+    if (!account || !vaultAddress) return;
+    const vault = vaultAddress; logsVault.current = vault;
+    setLogsState(st => (st === 'ok' ? st : 'loading')); setLogsError('');
+    try {
+      const p = provider();
+      const pub = READ_RPC ? new JsonRpcProvider(READ_RPC, chainId, { staticNetwork: true }) : null;
+      const sources: LogSource[] = [];
+      if (pub) sources.push(rpcLogSource('public RPC', pub));
+      sources.push(rpcLogSource('wallet RPC', p));
+      if (explorerBase) sources.push(blockscoutSource(explorerBase));
+      let start = 0;
+      try { if (isAddress(factoryAddress)) { const created = await scanLogs(sources, factoryAddress, [new Interface(FACTORY_ABI).getEvent('VaultCreated')!.topicHash, zeroPadValue(account, 32).toLowerCase(), zeroPadValue(vault, 32).toLowerCase()], 0); if (created.length) start = created[0].blockNumber; } } catch { start = 0; }
+      const raw = await scanLogs(sources, vault, [], start); // no topic filter: every event the vault emitted
+      const parsed: ParsedLog[] = [];
+      for (const l of raw) { try { const pl = vaultIface.parseLog({ topics: l.topics, data: l.data }); if (pl) parsed.push({ name: pl.name, args: pl.args as any, blockNumber: l.blockNumber, index: l.index, transactionHash: l.transactionHash, timestamp: 0 }); } catch { /* not a vault event */ } }
+      const blocks = [...new Set(parsed.map(l => l.blockNumber))]; const times = new Map<number, number>();
+      for (let i = 0; i < blocks.length; i += 8) await Promise.all(blocks.slice(i, i + 8).map(async n => { for (const prov of [pub, p]) { if (!prov) continue; try { const b = await prov.getBlock(n); if (b) { times.set(n, Number(b.timestamp)); return; } } catch { /* try next provider */ } } }));
+      for (const l of parsed) l.timestamp = times.get(l.blockNumber) || 0;
+      // Reverted transactions emit no events, so they are only visible through the block explorer's indexed transaction list.
+      let failed: FailedTx[] = []; let note = '';
+      try {
+        const r = await fetchFailedTxs(explorerBase, vault);
+        failed = r.txs.map(t => { let fn = ''; try { fn = vaultIface.parseTransaction({ data: t.input })?.name || ''; } catch { fn = ''; } return { hash: t.hash, from: t.from, blockNumber: t.blockNumber, timestamp: t.timestamp, fn }; });
+        if (!r.complete) note = 'Only the most recent reverted transactions could be loaded from the block explorer.';
+      } catch { note = 'Reverted transactions could not be loaded from the block explorer right now, so only successful on-chain events are listed below.'; }
+      if (logsVault.current !== vault) return;
+      setLogs(buildEntries(parsed, failed, { short, native: n => `${formatEther(n)} ${SYMBOL}` })); setLogsNote(note); setLogsState('ok');
+    } catch (e: any) {
+      if (logsVault.current !== vault) return;
+      setLogsState('error'); setLogsError(e.shortMessage || e.message || 'Could not read vault history.');
+    }
+  }, [account, vaultAddress, provider]);
+
   const connect = async () => { try { const p = provider(); const a = await p.send('eth_requestAccounts', []); const net = await p.getNetwork(); setAccount(a[0]); setChain(Number(net.chainId)); } catch (e: any) { notify(e.shortMessage || e.message || 'Wallet connection failed.'); } };
 
   useEffect(() => { if (!window.ethereum) return; const onAccounts = (a: string[]) => { setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
   useEffect(() => { let live = true; (async () => { if (!account || !chain || !factoryAddress || !chainId || chain !== chainId) return; try { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (live && v !== ZERO) setVaultAddress(v); else if (live) setVaultAddress(''); } catch (e: any) { notify('Could not read factory. Check the configured factory address and network.'); } })(); return () => { live = false; }; }, [account, chain, provider]);
+  useEffect(() => { setLogs([]); setLogsState('loading'); setLogsError(''); setLogsNote(''); setLogLimit(100); }, [vaultAddress]);
+  useEffect(() => { if (page === 'Activity' && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
   useEffect(() => { setAgents([]); setAgentsState('loading'); setAgentsError(''); }, [vaultAddress]);
   useEffect(() => { if (vaultAddress && account) refresh(); }, [vaultAddress, account, refresh]);
 
@@ -223,7 +276,7 @@ export default function Home() {
         <header className="top">
           <div>
             <small>Workspace / {page}</small>
-            <h1>{page === 'Overview' ? 'Security overview' : page}</h1>
+            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page}</h1>
           </div>
           <div className="top-actions">
             <span className="net"><i />Robinhood Chain <em>{networkName.toLowerCase()}</em></span>
@@ -348,15 +401,49 @@ export default function Home() {
               </>
             )}
 
-            {page === 'Activity' && (
-              <section className="panel">
-                <div className="panel-head">
-                  <div><h3>Vault event history</h3><p>Transfer and withdrawal events read from the vault contract.</p></div>
-                  <button className="btn btn-ghost btn-sm" disabled={busy} onClick={refresh}><RefreshCw size={14} className={busy ? 'spin' : ''} /> Refresh</button>
-                </div>
-                <EventList rows={events} />
-              </section>
-            )}
+            {page === 'Activity' && (() => {
+              const shown = filterEntries(logs, logFilter, logQuery);
+              return (
+                <section className="panel">
+                  <div className="panel-head">
+                    <div><h3>Activity &amp; security logs</h3><p>Every entry is read from your vault contract&apos;s on-chain events, newest first.</p></div>
+                    <button className="btn btn-ghost btn-sm" disabled={logsState === 'loading'} onClick={loadLogs}><RefreshCw size={14} className={logsState === 'loading' ? 'spin' : ''} /> Refresh</button>
+                  </div>
+                  <div className="log-filters" role="group" aria-label="Filter activity">
+                    {LOG_FILTERS.map(f => <button key={f.id} className={`btn btn-sm ${logFilter === f.id ? 'btn-primary' : 'btn-ghost'}`} aria-pressed={logFilter === f.id} onClick={() => { setLogFilter(f.id); setLogLimit(100); }}>{f.label}</button>)}
+                  </div>
+                  <input className="search" aria-label="Search by wallet address or transaction hash" placeholder="Search by wallet address or transaction hash" value={logQuery} onChange={e => { setLogQuery(e.target.value); setLogLimit(100); }} />
+                  {logsState === 'error' && <p className="empty">Could not load the vault history ({logsError}). This is a loading problem, not an empty log. <button className="link" onClick={loadLogs}>Retry</button></p>}
+                  {logsState === 'loading' && !logs.length && <p className="empty">Loading activity from the vault…</p>}
+                  {logsState !== 'loading' || logs.length ? (
+                    <div className="events">
+                      {shown.slice(0, logLimit).map(e => (
+                        <div className={`event ${e.status === 'Success' && e.categories.includes('transaction') ? 'event-good' : ''}`} key={e.key}>
+                          <i aria-hidden="true" />
+                          <div className="log-body">
+                            <b>{e.type} <span className={`pill ${e.status === 'Failed' ? 'pill-stop' : ''}`}>{e.status}</span></b>
+                            <small>{e.description}</small>
+                            <small className="log-meta">
+                              <span>{e.timestamp ? new Date(e.timestamp * 1000).toLocaleString() : 'Time unavailable'} · Block {e.blockNumber}</span>
+                              {e.agent && <span>Agent <code title={e.agent}>{short(e.agent)}</code></span>}
+                              {e.recipient && <span>Recipient <code title={e.recipient}>{short(e.recipient)}</code></span>}
+                              {e.token && <span>Token <code title={e.token}>{short(e.token)}</code></span>}
+                              {e.amountText && <span>Amount {e.amountText}</span>}
+                              <span>Tx <a href={`${explorerBase}/tx/${e.hash}`} target="_blank" rel="noreferrer"><code title={e.hash}>{short(e.hash)}</code></a></span>
+                            </small>
+                          </div>
+                          <a title="Open transaction in explorer" aria-label="Open transaction in explorer" href={`${explorerBase}/tx/${e.hash}`} target="_blank" rel="noreferrer"><ExternalLink size={14} /></a>
+                        </div>
+                      ))}
+                      {logsState === 'ok' && !shown.length && <p className="empty">{logs.length ? 'No activity matches this filter or search.' : 'No activity has been recorded for this vault yet.'}</p>}
+                    </div>
+                  ) : null}
+                  {shown.length > logLimit && <button className="btn btn-ghost btn-sm" onClick={() => setLogLimit(n => n + 100)}>Show more ({shown.length - logLimit} remaining)</button>}
+                  {logsNote && <small className="help">{logsNote}</small>}
+                  <small className="help">The vault contract records successful actions and configuration changes as events. Reverted transactions emit no events, so blocked or failed attempts appear only when the block explorer reports them, and their revert reason is not decoded here.</small>
+                </section>
+              );
+            })()}
 
             {page === 'Settings' && (
               <>
