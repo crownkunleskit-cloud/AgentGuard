@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserProvider, Contract, Interface, JsonRpcProvider, formatEther, parseEther, isAddress, zeroPadValue } from 'ethers';
-import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Wallet, X } from 'lucide-react';
+import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, HeartPulse, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Wallet, X } from 'lucide-react';
 import Landing from './components/Landing';
 import { Brand } from './components/Mark';
 import { blockscoutSource, scanLogs, type LogSource, type RawLog } from './lib/logScan';
 import { buildEntries, fetchFailedTxs, filterEntries, type FailedTx, type LogEntry, type LogFilter, type ParsedLog } from './lib/activityLog';
+import AgentHealthView, { type HealthPermissions } from './components/AgentHealth';
+import { computeHealth, currentPermissions, type FailedDataState, type LiveAgent } from './lib/agentHealth';
 
 declare global { interface Window { ethereum?: any } }
 
@@ -14,7 +16,7 @@ type Agent = { address: string; registered: boolean; paused: boolean; maxNativeP
 type EventRow = { title: string; detail: string; hash: string; block: number; kind: 'good' | 'bad' | 'neutral' };
 type AgentsState = 'loading' | 'ok' | 'error';
 const LOG_FILTERS: { id: LogFilter; label: string }[] = [{ id: 'all', label: 'All activity' }, { id: 'transaction', label: 'Transactions' }, { id: 'agent', label: 'Agent activity' }, { id: 'security', label: 'Security events' }];
-type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Settings';
+type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Agent Health' | 'Settings';
 type Modal = 'agent' | 'recipient' | 'token' | 'fund' | 'withdraw' | 'limits' | 'revoke' | '';
 
 /* ───────── Contracts and network: unchanged from the original build ───────── */
@@ -52,6 +54,7 @@ const NAV: { page: Page; icon: React.ReactNode }[] = [
   { page: 'My agents', icon: <Bot /> },
   { page: 'Permissions', icon: <SlidersHorizontal /> },
   { page: 'Activity', icon: <Activity /> },
+  { page: 'Agent Health', icon: <HeartPulse /> },
   { page: 'Settings', icon: <LockKeyhole /> },
 ];
 
@@ -81,6 +84,12 @@ export default function Home() {
   const [logQuery, setLogQuery] = useState('');
   const [logLimit, setLogLimit] = useState(100);
   const logsVault = useRef('');
+  // Agent Health Monitoring: reuses the Activity & Security Logs data above; adds live contract reads.
+  const [failedState, setFailedState] = useState<FailedDataState>('unavailable');
+  const [healthLive, setHealthLive] = useState<{ live: Map<string, LiveAgent>; globalPaused: boolean | null; permissions: HealthPermissions | null; checkedAt: number } | null>(null);
+  const [healthNonce, setHealthNonce] = useState(0);
+  const healthRun = useRef(0);
+  const [healthBusy, setHealthBusy] = useState(false);
   const [agentsState, setAgentsState] = useState<AgentsState>('loading');
   const [agentsError, setAgentsError] = useState('');
   const [recipients, setRecipients] = useState<string[]>([]);
@@ -174,14 +183,15 @@ export default function Home() {
       for (let i = 0; i < blocks.length; i += 8) await Promise.all(blocks.slice(i, i + 8).map(async n => { for (const prov of [pub, p]) { if (!prov) continue; try { const b = await prov.getBlock(n); if (b) { times.set(n, Number(b.timestamp)); return; } } catch { /* try next provider */ } } }));
       for (const l of parsed) l.timestamp = times.get(l.blockNumber) || 0;
       // Reverted transactions emit no events, so they are only visible through the block explorer's indexed transaction list.
-      let failed: FailedTx[] = []; let note = '';
+      let failed: FailedTx[] = []; let note = ''; let failedComplete: FailedDataState = 'unavailable';
       try {
         const r = await fetchFailedTxs(explorerBase, vault);
         failed = r.txs.map(t => { let fn = ''; try { fn = vaultIface.parseTransaction({ data: t.input })?.name || ''; } catch { fn = ''; } return { hash: t.hash, from: t.from, blockNumber: t.blockNumber, timestamp: t.timestamp, fn }; });
+        failedComplete = r.complete ? 'complete' : 'partial';
         if (!r.complete) note = 'Only the most recent reverted transactions could be loaded from the block explorer.';
       } catch { note = 'Reverted transactions could not be loaded from the block explorer right now, so only successful on-chain events are listed below.'; }
       if (logsVault.current !== vault) return;
-      setLogs(buildEntries(parsed, failed, { short, native: n => `${formatEther(n)} ${SYMBOL}` })); setLogsNote(note); setLogsState('ok');
+      setLogs(buildEntries(parsed, failed, { short, native: n => `${formatEther(n)} ${SYMBOL}` })); setLogsNote(note); setFailedState(failedComplete); setLogsState('ok');
     } catch (e: any) {
       if (logsVault.current !== vault) return;
       setLogsState('error'); setLogsError(e.shortMessage || e.message || 'Could not read vault history.');
@@ -193,7 +203,38 @@ export default function Home() {
   useEffect(() => { if (!window.ethereum) return; const onAccounts = (a: string[]) => { setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
   useEffect(() => { let live = true; (async () => { if (!account || !chain || !factoryAddress || !chainId || chain !== chainId) return; try { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (live && v !== ZERO) setVaultAddress(v); else if (live) setVaultAddress(''); } catch (e: any) { notify('Could not read factory. Check the configured factory address and network.'); } })(); return () => { live = false; }; }, [account, chain, provider]);
   useEffect(() => { setLogs([]); setLogsState('loading'); setLogsError(''); setLogsNote(''); setLogLimit(100); }, [vaultAddress]);
-  useEffect(() => { if (page === 'Activity' && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
+  useEffect(() => { if ((page === 'Activity' || page === 'Agent Health') && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
+  useEffect(() => { healthRun.current++; setHealthLive(null); setHealthBusy(false); }, [vaultAddress]);
+
+  // Agent Health: every agent ever registered (from the logs, so revoked agents are included) plus the live-registered ones.
+  const healthAddrs = useMemo(() => [...new Set([...agents.map(a => a.address.toLowerCase()), ...(logsState === 'ok' ? logs.filter(e => e.type === 'Agent registered' && e.agent).map(e => e.agent!.toLowerCase()) : [])])].sort(), [agents, logs, logsState]);
+  const healthPerms = useMemo(() => (logsState === 'ok' ? currentPermissions(logs) : null), [logs, logsState]);
+  // Live reads (authorization, pause state, approved recipients/tokens) run each time the page opens or is refreshed. A failed read is
+  // recorded as a failure (shown as Unknown / Unavailable), never as "not registered" or "none".
+  useEffect(() => {
+    if (page !== 'Agent Health' || !vaultAddress || !account || chain !== chainId) return;
+    const vault = vaultAddress; const run = ++healthRun.current; setHealthBusy(true);
+    (async () => {
+      const live = new Map<string, LiveAgent>(); let globalPaused: boolean | null = null; let permissions: HealthPermissions | null = null;
+      const provs: any[] = []; try { if (READ_RPC) provs.push(new JsonRpcProvider(READ_RPC, chainId, { staticNetwork: true })); } catch { /* ignore */ } try { provs.push(provider()); } catch { /* no wallet provider */ }
+      const read = async <T,>(fn: (c: Contract) => Promise<T>): Promise<T> => { let last: any = new Error('no RPC available'); for (const pv of provs) { try { return await fn(new Contract(vault, VAULT_ABI, pv)); } catch (e) { last = e; } } throw last; };
+      const msg = (e: any) => String(e?.shortMessage || e?.message || e).slice(0, 120);
+      await Promise.all([
+        (async () => { try { globalPaused = await read(c => c.globallyPaused()); } catch { globalPaused = null; } })(),
+        ...healthAddrs.map(async a => { try { const x: any = await read(c => c.agents(a)); live.set(a, { ok: true, registered: x.registered, paused: x.paused, maxNativePerTx: x.maxNativePerTx, maxNativePerDay: x.maxNativePerDay, dayStart: x.dayStart, nativeSpentToday: x.nativeSpentToday }); } catch (e) { live.set(a, { ok: false, error: msg(e) }); } }),
+      ]);
+      if (healthPerms) {
+        try {
+          const recs = await Promise.all(healthPerms.recipients.map(async a => ({ a, ok: (await read(c => c.allowedRecipients(a))) as boolean })));
+          const toks = await Promise.all(healthPerms.tokens.map(async a => { const [ok, tx, day] = await read(async c => Promise.all([c.allowedTokens(a), c.tokenMaxPerTx(a), c.tokenMaxPerDay(a)])); return { address: a, ok: ok as boolean, maxPerTx: BigInt(tx), maxPerDay: BigInt(day) }; }));
+          permissions = { recipients: recs.filter(r => r.ok).map(r => r.a), tokens: toks.filter(t => t.ok).map(({ address, maxPerTx, maxPerDay }) => ({ address, maxPerTx, maxPerDay })) };
+        } catch { permissions = null; }
+      }
+      if (healthRun.current !== run) return; // a newer read (or a different vault) superseded this one
+      setHealthLive({ live, globalPaused, permissions, checkedAt: Math.floor(Date.now() / 1000) }); setHealthBusy(false);
+    })();
+  }, [page, vaultAddress, account, chain, healthAddrs, healthPerms, healthNonce, provider]);
+  const refreshHealth = () => { loadLogs(); setHealthNonce(n => n + 1); refresh(); };
   useEffect(() => { setAgents([]); setAgentsState('loading'); setAgentsError(''); }, [vaultAddress]);
   useEffect(() => { if (vaultAddress && account) refresh(); }, [vaultAddress, account, refresh]);
 
@@ -276,7 +317,7 @@ export default function Home() {
         <header className="top">
           <div>
             <small>Workspace / {page}</small>
-            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page}</h1>
+            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page === 'Agent Health' ? 'Agent Health Monitoring' : page}</h1>
           </div>
           <div className="top-actions">
             <span className="net"><i />Robinhood Chain <em>{networkName.toLowerCase()}</em></span>
@@ -443,6 +484,12 @@ export default function Home() {
                   <small className="help">The vault contract records successful actions and configuration changes as events. Reverted transactions emit no events, so blocked or failed attempts appear only when the block explorer reports them, and their revert reason is not decoded here.</small>
                 </section>
               );
+            })()}
+
+            {page === 'Agent Health' && (() => {
+              const loading = !healthLive || (logsState === 'loading' && !logs.length) || healthAddrs.some(a => !healthLive.live.has(a)); // live reads for newly discovered agents are still in flight
+              const health = healthLive ? computeHealth({ entries: logsState === 'ok' ? logs : null, failedState, live: healthLive.live, globalPaused: healthLive.globalPaused, knownAgents: agents.map(a => a.address), now: healthLive.checkedAt }) : null;
+              return <AgentHealthView state={chain !== chainId ? 'error' : loading ? 'loading' : 'ok'} error={`your wallet is on chain ${chain}; switch to chain ${chainId}`} agents={health?.agents || []} counts={health?.counts || { Healthy: 0, Inactive: 0, Restricted: 0, Warning: 0, Unknown: 0 }} checkedAt={healthLive?.checkedAt || 0} permissions={healthLive?.permissions ?? null} historyOk={logsState === 'ok'} refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth} explorerBase={explorerBase} short={short} money={money} />;
             })()}
 
             {page === 'Settings' && (
