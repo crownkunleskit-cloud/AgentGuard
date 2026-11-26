@@ -8,6 +8,8 @@ import { Brand } from './components/Mark';
 import { blockscoutSource, scanLogs, type LogSource, type RawLog } from './lib/logScan';
 import { buildEntries, fetchFailedTxs, filterEntries, type FailedTx, type LogEntry, type LogFilter, type ParsedLog } from './lib/activityLog';
 import AgentHealthView, { type HealthPermissions } from './components/AgentHealth';
+import AgentRiskView from './components/AgentRisk';
+import { computeRisk } from './lib/agentRisk';
 import { computeHealth, currentPermissions, type FailedDataState, type LiveAgent } from './lib/agentHealth';
 
 declare global { interface Window { ethereum?: any } }
@@ -16,7 +18,7 @@ type Agent = { address: string; registered: boolean; paused: boolean; maxNativeP
 type EventRow = { title: string; detail: string; hash: string; block: number; kind: 'good' | 'bad' | 'neutral' };
 type AgentsState = 'loading' | 'ok' | 'error';
 const LOG_FILTERS: { id: LogFilter; label: string }[] = [{ id: 'all', label: 'All activity' }, { id: 'transaction', label: 'Transactions' }, { id: 'agent', label: 'Agent activity' }, { id: 'security', label: 'Security events' }];
-type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Agent Health' | 'Settings';
+type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Agent Health' | 'Risk Insights' | 'Settings';
 type Modal = 'agent' | 'recipient' | 'token' | 'fund' | 'withdraw' | 'limits' | 'revoke' | '';
 
 /* ───────── Contracts and network: unchanged from the original build ───────── */
@@ -25,6 +27,8 @@ const VAULT_ABI = [
   'function owner() view returns(address)', 'function globallyPaused() view returns(bool)', 'function agents(address) view returns(bool registered,bool paused,uint128 maxNativePerTx,uint128 maxNativePerDay,uint64 dayStart,uint128 nativeSpentToday)',
   'function allowedRecipients(address) view returns(bool)', 'function allowedTokens(address) view returns(bool)', 'function tokenMaxPerTx(address) view returns(uint128)', 'function tokenMaxPerDay(address) view returns(uint128)',
   'function registerAgent(address,uint128,uint128)', 'function setAgentLimits(address,uint128,uint128)', 'function setAgentPaused(address,bool)', 'function revokeAgent(address)', 'function setGlobalPause(bool)', 'function setRecipient(address,bool)', 'function setTokenPolicy(address,bool,uint128,uint128)', 'function ownerWithdrawNative(address payable,uint128)', 'function ownerWithdrawToken(address,address,uint128)',
+  // Agent transfer functions. Listed so reverted agent calls can be decoded by name and arguments (Activity logs / Risk Insights).
+  'function executeNative(address payable recipient,uint128 amount)', 'function executeTokenTransfer(address token,address recipient,uint128 amount)',
   'event AgentRegistered(address indexed agent,uint256 maxNativePerTx,uint256 maxNativePerDay)', 'event AgentStatusChanged(address indexed agent,bool paused)', 'event AgentRevoked(address indexed agent)', 'event RecipientPermissionChanged(address indexed recipient,bool allowed)', 'event TokenPolicyChanged(address indexed token,bool allowed,uint256 maxPerTx,uint256 maxPerDay)', 'event GlobalPauseChanged(bool paused)', 'event NativeTransferExecuted(address indexed agent,address indexed recipient,uint256 amount)', 'event TokenTransferExecuted(address indexed agent,address indexed token,address indexed recipient,uint256 amount)', 'event OwnerWithdrawal(address indexed asset,address indexed recipient,uint256 amount)',
 ];
 const chainId = Number(process.env.NEXT_PUBLIC_RH_CHAIN_ID || process.env.NEXT_PUBLIC_RH_TESTNET_CHAIN_ID || '46630');
@@ -55,6 +59,7 @@ const NAV: { page: Page; icon: React.ReactNode }[] = [
   { page: 'Permissions', icon: <SlidersHorizontal /> },
   { page: 'Activity', icon: <Activity /> },
   { page: 'Agent Health', icon: <HeartPulse /> },
+  { page: 'Risk Insights', icon: <ShieldAlert /> },
   { page: 'Settings', icon: <LockKeyhole /> },
 ];
 
@@ -186,7 +191,15 @@ export default function Home() {
       let failed: FailedTx[] = []; let note = ''; let failedComplete: FailedDataState = 'unavailable';
       try {
         const r = await fetchFailedTxs(explorerBase, vault);
-        failed = r.txs.map(t => { let fn = ''; try { fn = vaultIface.parseTransaction({ data: t.input })?.name || ''; } catch { fn = ''; } return { hash: t.hash, from: t.from, blockNumber: t.blockNumber, timestamp: t.timestamp, fn }; });
+        failed = r.txs.map(t => {
+          let fn = ''; let recipient: string | undefined; let token: string | undefined; let amount: bigint | undefined;
+          try {
+            const d = vaultIface.parseTransaction({ data: t.input }); fn = d?.name || '';
+            if (d && fn === 'executeNative') { recipient = d.args[0]; amount = BigInt(d.args[1]); }
+            else if (d && fn === 'executeTokenTransfer') { token = d.args[0]; recipient = d.args[1]; amount = BigInt(d.args[2]); }
+          } catch { fn = ''; }
+          return { hash: t.hash, from: t.from, blockNumber: t.blockNumber, timestamp: t.timestamp, fn, recipient, token, amount };
+        });
         failedComplete = r.complete ? 'complete' : 'partial';
         if (!r.complete) note = 'Only the most recent reverted transactions could be loaded from the block explorer.';
       } catch { note = 'Reverted transactions could not be loaded from the block explorer right now, so only successful on-chain events are listed below.'; }
@@ -203,7 +216,7 @@ export default function Home() {
   useEffect(() => { if (!window.ethereum) return; const onAccounts = (a: string[]) => { setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
   useEffect(() => { let live = true; (async () => { if (!account || !chain || !factoryAddress || !chainId || chain !== chainId) return; try { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (live && v !== ZERO) setVaultAddress(v); else if (live) setVaultAddress(''); } catch (e: any) { notify('Could not read factory. Check the configured factory address and network.'); } })(); return () => { live = false; }; }, [account, chain, provider]);
   useEffect(() => { setLogs([]); setLogsState('loading'); setLogsError(''); setLogsNote(''); setLogLimit(100); }, [vaultAddress]);
-  useEffect(() => { if ((page === 'Activity' || page === 'Agent Health') && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
+  useEffect(() => { if ((page === 'Activity' || page === 'Agent Health' || page === 'Risk Insights') && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
   useEffect(() => { healthRun.current++; setHealthLive(null); setHealthBusy(false); }, [vaultAddress]);
 
   // Agent Health: every agent ever registered (from the logs, so revoked agents are included) plus the live-registered ones.
@@ -212,7 +225,7 @@ export default function Home() {
   // Live reads (authorization, pause state, approved recipients/tokens) run each time the page opens or is refreshed. A failed read is
   // recorded as a failure (shown as Unknown / Unavailable), never as "not registered" or "none".
   useEffect(() => {
-    if (page !== 'Agent Health' || !vaultAddress || !account || chain !== chainId) return;
+    if ((page !== 'Agent Health' && page !== 'Risk Insights') || !vaultAddress || !account || chain !== chainId) return;
     const vault = vaultAddress; const run = ++healthRun.current; setHealthBusy(true);
     (async () => {
       const live = new Map<string, LiveAgent>(); let globalPaused: boolean | null = null; let permissions: HealthPermissions | null = null;
@@ -317,7 +330,7 @@ export default function Home() {
         <header className="top">
           <div>
             <small>Workspace / {page}</small>
-            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page === 'Agent Health' ? 'Agent Health Monitoring' : page}</h1>
+            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page === 'Agent Health' ? 'Agent Health Monitoring' : page === 'Risk Insights' ? 'Agent Risk Insights' : page}</h1>
           </div>
           <div className="top-actions">
             <span className="net"><i />Robinhood Chain <em>{networkName.toLowerCase()}</em></span>
@@ -490,6 +503,16 @@ export default function Home() {
               const loading = !healthLive || (logsState === 'loading' && !logs.length) || healthAddrs.some(a => !healthLive.live.has(a)); // live reads for newly discovered agents are still in flight
               const health = healthLive ? computeHealth({ entries: logsState === 'ok' ? logs : null, failedState, live: healthLive.live, globalPaused: healthLive.globalPaused, knownAgents: agents.map(a => a.address), now: healthLive.checkedAt }) : null;
               return <AgentHealthView state={chain !== chainId ? 'error' : loading ? 'loading' : 'ok'} error={`your wallet is on chain ${chain}; switch to chain ${chainId}`} agents={health?.agents || []} counts={health?.counts || { Healthy: 0, Inactive: 0, Restricted: 0, Warning: 0, Unknown: 0 }} checkedAt={healthLive?.checkedAt || 0} permissions={healthLive?.permissions ?? null} historyOk={logsState === 'ok'} refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth} explorerBase={explorerBase} short={short} money={money} />;
+            })()}
+
+            {page === 'Risk Insights' && (() => {
+              // Agent Risk Insights: deterministic scoring from the same Activity-log entries and Health results (see app/lib/agentRisk.ts).
+              const loading = !healthLive || (logsState === 'loading' && !logs.length) || healthAddrs.some(a => !healthLive.live.has(a));
+              const entries = logsState === 'ok' ? logs : null;
+              const health = healthLive ? computeHealth({ entries, failedState, live: healthLive.live, globalPaused: healthLive.globalPaused, knownAgents: agents.map(a => a.address), now: healthLive.checkedAt }) : null;
+              const rctx = { now: healthLive?.checkedAt || Math.floor(Date.now() / 1000), failedState, short, native: (n: bigint) => `${formatEther(n)} ${SYMBOL}` };
+              const risk = computeRisk(health?.agents || [], entries, rctx);
+              return <AgentRiskView state={chain !== chainId ? 'error' : loading ? 'loading' : 'ok'} error={`your wallet is on chain ${chain}; switch to chain ${chainId}`} agents={risk.agents} overview={risk.overview} health={Object.fromEntries((health?.agents || []).map(h => [h.address, h]))} checkedAt={healthLive?.checkedAt || 0} historyOk={logsState === 'ok'} failedState={failedState} refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth} explorerBase={explorerBase} short={short} />;
             })()}
 
             {page === 'Settings' && (

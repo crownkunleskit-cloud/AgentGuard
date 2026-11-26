@@ -11,7 +11,7 @@ export type LogFilter = 'all' | LogCategory;
 /** A vault event already decoded with the deployed ABI. */
 export type ParsedLog = { name: string; args: Record<string, any>; blockNumber: number; index: number; transactionHash: string; timestamp: number };
 /** A transaction sent to the vault that the explorer reports as reverted (no events are emitted by reverted transactions). */
-export type FailedTx = { hash: string; from: string; blockNumber: number; timestamp: number; fn: string };
+export type FailedTx = { hash: string; from: string; blockNumber: number; timestamp: number; fn: string; recipient?: string; token?: string; amount?: bigint };
 
 export type LogEntry = {
   key: string;
@@ -22,6 +22,10 @@ export type LogEntry = {
   blockNumber: number;
   index: number;
   agent?: string; recipient?: string; token?: string; amountText?: string;
+  /** Raw numeric values, used by Agent Risk Insights. amount = transfer amount (or the amount an agent tried to send in a reverted call). */
+  amount?: bigint; limitPerTx?: bigint; limitPerDay?: bigint;
+  /** Name of the vault function called, for reverted transactions (decoded from the transaction input). */
+  fn?: string;
   hash: string;
   status: 'Success' | 'Failed';
   addresses: string[];    // every wallet address on the entry (used by search)
@@ -44,23 +48,23 @@ export function buildEntries(logs: ParsedLog[], failed: FailedTx[], f: Fmt): Log
     const a = l.args;
     switch (l.name) {
       case 'AgentRegistered':
-        add(l, { categories: ['agent'], type: 'Agent registered', agent: a.agent, description: `Agent ${f.short(a.agent)} was registered with limits of ${f.native(toBig(a.maxNativePerTx))} per transaction and ${f.native(toBig(a.maxNativePerDay))} per day.` }); break;
+        add(l, { categories: ['agent'], type: 'Agent registered', agent: a.agent, limitPerTx: toBig(a.maxNativePerTx), limitPerDay: toBig(a.maxNativePerDay), description: `Agent ${f.short(a.agent)} was registered with limits of ${f.native(toBig(a.maxNativePerTx))} per transaction and ${f.native(toBig(a.maxNativePerDay))} per day.` }); break;
       case 'AgentRevoked':
         add(l, { categories: ['agent', 'security'], type: 'Agent revoked', agent: a.agent, description: `Agent ${f.short(a.agent)} was permanently revoked and lost all vault access.` }); break;
       case 'AgentStatusChanged':
         add(l, { categories: ['agent', 'security'], type: a.paused ? 'Agent paused' : 'Agent resumed', agent: a.agent, description: a.paused ? `Agent ${f.short(a.agent)} was paused by the owner.` : `Agent ${f.short(a.agent)} was resumed by the owner.` }); break;
       case 'AgentLimitsChanged':
-        add(l, { categories: ['agent', 'security'], type: 'Spending limits changed', agent: a.agent, description: `Limits for agent ${f.short(a.agent)} are now ${f.native(toBig(a.maxNativePerTx))} per transaction and ${f.native(toBig(a.maxNativePerDay))} per day.` }); break;
+        add(l, { categories: ['agent', 'security'], type: 'Spending limits changed', agent: a.agent, limitPerTx: toBig(a.maxNativePerTx), limitPerDay: toBig(a.maxNativePerDay), description: `Limits for agent ${f.short(a.agent)} are now ${f.native(toBig(a.maxNativePerTx))} per transaction and ${f.native(toBig(a.maxNativePerDay))} per day.` }); break;
       case 'RecipientPermissionChanged':
         add(l, { categories: ['security'], type: a.allowed ? 'Recipient added' : 'Recipient removed', recipient: a.recipient, description: a.allowed ? `${f.short(a.recipient)} was added to the approved recipients.` : `${f.short(a.recipient)} was removed from the approved recipients.` }); break;
       case 'TokenPolicyChanged':
-        add(l, { categories: ['security'], type: a.allowed ? 'Token permission added' : 'Token permission removed', token: a.token, amountText: a.allowed ? `limits ${toBig(a.maxPerTx)} per tx / ${toBig(a.maxPerDay)} per day (token units)` : undefined, description: a.allowed ? `Token ${f.short(a.token)} was approved with a limit of ${toBig(a.maxPerTx)} units per transaction and ${toBig(a.maxPerDay)} per day.` : `Token ${f.short(a.token)} permission was removed.` }); break;
+        add(l, { categories: ['security'], type: a.allowed ? 'Token permission added' : 'Token permission removed', token: a.token, limitPerTx: toBig(a.maxPerTx), limitPerDay: toBig(a.maxPerDay), amountText: a.allowed ? `limits ${toBig(a.maxPerTx)} per tx / ${toBig(a.maxPerDay)} per day (token units)` : undefined, description: a.allowed ? `Token ${f.short(a.token)} was approved with a limit of ${toBig(a.maxPerTx)} units per transaction and ${toBig(a.maxPerDay)} per day.` : `Token ${f.short(a.token)} permission was removed.` }); break;
       case 'GlobalPauseChanged':
         add(l, { categories: ['security'], type: a.paused ? 'Emergency pause enabled' : 'Emergency pause disabled', description: a.paused ? 'Emergency pause was enabled. All agents are blocked from executing transfers.' : 'Emergency pause was disabled. Agents can execute transfers within their limits again.' }); break;
       case 'NativeTransferExecuted':
-        add(l, { categories: ['transaction', 'agent'], type: 'Native transfer executed', agent: a.agent, recipient: a.recipient, amountText: f.native(toBig(a.amount)), description: `Agent ${f.short(a.agent)} sent ${f.native(toBig(a.amount))} to ${f.short(a.recipient)}.` }); break;
+        add(l, { categories: ['transaction', 'agent'], type: 'Native transfer executed', agent: a.agent, recipient: a.recipient, amount: toBig(a.amount), amountText: f.native(toBig(a.amount)), description: `Agent ${f.short(a.agent)} sent ${f.native(toBig(a.amount))} to ${f.short(a.recipient)}.` }); break;
       case 'TokenTransferExecuted':
-        add(l, { categories: ['transaction', 'agent'], type: 'Token transfer executed', agent: a.agent, recipient: a.recipient, token: a.token, amountText: `${toBig(a.amount)} units`, description: `Agent ${f.short(a.agent)} sent ${toBig(a.amount)} units of token ${f.short(a.token)} to ${f.short(a.recipient)}.` }); break;
+        add(l, { categories: ['transaction', 'agent'], type: 'Token transfer executed', agent: a.agent, recipient: a.recipient, token: a.token, amount: toBig(a.amount), amountText: `${toBig(a.amount)} units`, description: `Agent ${f.short(a.agent)} sent ${toBig(a.amount)} units of token ${f.short(a.token)} to ${f.short(a.recipient)}.` }); break;
       case 'OwnerWithdrawal': {
         const isNative = /^0x0{40}$/i.test(a.asset);
         add(l, { categories: ['transaction', 'security'], type: 'Owner withdrawal', recipient: a.recipient, token: isNative ? undefined : a.asset, amountText: isNative ? f.native(toBig(a.amount)) : `${toBig(a.amount)} units`, description: `The owner withdrew ${isNative ? f.native(toBig(a.amount)) : `${toBig(a.amount)} units of token ${f.short(a.asset)}`} to ${f.short(a.recipient)}.` }); break;
@@ -76,6 +80,7 @@ export function buildEntries(logs: ParsedLog[], failed: FailedTx[], f: Fmt): Log
       key, categories: ['transaction', 'security'], type: isTransfer ? 'Blocked agent transfer' : 'Failed transaction',
       description: `${isTransfer ? 'An agent transfer call' : `A call to ${t.fn || 'the vault'}`} from ${f.short(t.from)} reverted on-chain. No funds moved. The revert reason is not shown here; open the transaction in the explorer for details.`,
       timestamp: t.timestamp, blockNumber: t.blockNumber, index: Number.MAX_SAFE_INTEGER, hash: t.hash, status: 'Failed', addresses: [low(t.from)], agent: isTransfer ? t.from : undefined,
+      fn: t.fn || undefined, recipient: t.recipient, token: t.token, amount: t.amount,
     });
   }
   return sortEntries([...out.values()]);

@@ -111,3 +111,33 @@ Supported by the deployed V1 contracts (real events): agent registered / revoked
 Not emitted by the V1 contracts, so NOT tracked as events: transaction requests (V1 has no request flow), ownership changes (the owner is immutable), and rejected calls. Reverted transactions emit no events; the page additionally asks the block explorer's transaction list for reverted transactions sent to the vault and shows them as "Failed" / "Blocked agent transfer" when the explorer returns them. Their revert reason is not decoded, and if the explorer is unreachable the page says so instead of implying there were none.
 
 No contract, deployment or environment-variable changes are needed.
+
+## Agent Risk Insights
+
+The **Risk Insights** page scores every agent from 0 to 100 (higher = riskier) using only the vault's real on-chain history. It reuses the Activity & Security Logs entries and the Agent Health results, and runs when the page is opened or refreshed (it is not continuous monitoring). It is analysis only: nothing is ever revoked, paused, limited or moved automatically. The scoring code is `app/lib/agentRisk.ts` (pure, deterministic, no AI, no network calls); the tables below are rendered from the same `INDICATORS` list the UI shows under "How scores are calculated".
+
+**Levels:** Low 0-29, Medium 30-59, High 60-79, Critical 80-100, or "Insufficient data" (score shown as unavailable).
+
+**Combination:** `score = min(100, confirmed points + min(40, behavioural points))`. Behavioural indicators alone can never exceed Medium, and no single indicator exceeds 45 points. **Recency:** only the last 30 days are scored; a finding whose newest evidence is within 7 days counts 100%, older evidence in the window counts 60%; older or undated evidence is listed as "not scored". **Missing data** never adds risk: it lowers *confidence* (High / Medium / Low) and the affected check is listed under "Checks not performed". **Inactivity** never adds risk.
+
+| Indicator | Type / severity | Points (by evidence count) |
+|---|---|---|
+| Reverted transfer to a recipient not approved at that block | Confirmed / High | 1: 10, 2: 20, 3+: 35, 5+: 45 |
+| Calls after the agent was revoked | Confirmed / High | 1: 20, 2+: 30, 4+: 40 |
+| Reverted calls to owner-only functions | Confirmed / High | 1: 25, 2: 35, 3+: 45 |
+| Reverted transfer above the per-transaction limit in force | Confirmed / Medium | 1: 8, 2+: 15, 4+: 25 |
+| Reverted transfer of a token not approved at that block | Confirmed / Medium | 1: 10, 2: 20, 3+: 30 |
+| Repeated unexplained reverts (7 days) | Behavioural / Low | 3+: 5, 5+: 10 |
+| Calls while paused (7 days) | Behavioural / Low | 3+: 5, 5+: 10 |
+| Frequency spike: 24h transfers >= 5 and >= 3x own 14-day daily average (needs 7+ days, 5+ transfers of history) | Behavioural / Medium | 3x: 15, 6x: 25, 10x: 30 |
+| Unusual amount: > 5x the median of 8+ earlier transfers of the same asset (7 days) | Behavioural / Medium | 1: 10, 2+: 20 |
+| 3+ first-time recipients (7 days, after 8+ transfers) | Behavioural / Low | 3+: 8, 5+: 15 |
+| Another finding's evidence within 24h after a recipient/token approval, limit change or resume | Behavioural / Low | +10 (only with another finding) |
+
+Each reverted agent call is assigned to exactly one cause, following the vault contract's own check order (not registered -> paused -> token/recipient not approved -> over limit), using the permission and limit state replayed from events at that block; if a relevant event shares the block the cause is not guessed. Nothing is double counted.
+
+**Data sources:** (1) the vault's events (full history from the vault's creation block); (2) reverted transactions sent to the vault, from the block explorer's transaction list, decoded with the vault ABI to recover the function, recipient, token and amount the agent tried to use; (3) live `agents(address)` / `globallyPaused()` reads via Agent Health.
+
+**Limitations:** reverted transactions emit no events, so blocked-attempt detections need the explorer API; if it is unreachable those checks are listed as not performed and confidence drops. The revert reason is inferred from on-chain state, not read from the node. Findings are indicators from observable data, not proof of malice. Agents are scored against their own history, so a brand-new agent has no frequency or amount baseline. The V1 contracts record no agent names, no off-chain intent and no attempts that never reached the chain.
+
+No contract, deployment or environment-variable changes are needed.
