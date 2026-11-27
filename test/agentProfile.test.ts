@@ -161,4 +161,21 @@ describe('Agent Security Profiles', () => {
     const ps = build(logs, [], { live: new Map<string, LiveAgent>([[A, live()], [B, live({ registered: false })]]) });
     assert.deepEqual(ps.map(p => p.address).sort(), [A, B].sort());
   });
+
+  it('degenerate inputs never throw: no agents, nothing readable, and the inputs are not mutated', () => {
+    assert.deepEqual(build([], [], { live: new Map(), entriesNull: true, permissions: null, globalPaused: null }), []);
+    const entries = buildEntries([reg(A), sent(A, DAY)], [], fmt); const before = JSON.stringify(entries, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
+    const h = computeHealth({ entries, failedState: 'unavailable', live: new Map<string, LiveAgent>([[A, { ok: false, error: 'x' }]]), globalPaused: null, knownAgents: [A], now: NOW });
+    const r = computeRisk(h.agents, entries, { now: NOW, failedState: 'unavailable', short: fmt.short, native: fmt.native });
+    const ps = computeProfiles(h.agents, r.agents, { vault: VAULT, owner: OWNER, chainId: 1, networkName: 'X', explorer: '', permissions: null, globalPaused: null, entries, now: NOW });
+    assert.equal(ps.length, 1); assert.equal(ps[0].security.status, 'Unavailable');
+    assert.equal(JSON.stringify(entries, (_, v) => (typeof v === 'bigint' ? v.toString() : v)), before);
+  });
+
+  it('profiles are derived from the agents Health already lists: they never add or drop an agent of their own', () => {
+    const logs = [reg(A), reg(B), reg(C)];
+    const m = new Map<string, LiveAgent>([[A, live()], [B, live()], [C, live({ registered: false })]]);
+    const ps = build(logs, [], { live: m });
+    assert.deepEqual(ps.map(p => p.address).sort(), [A, B, C].sort());
+  });
 });

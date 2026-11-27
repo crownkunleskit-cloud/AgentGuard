@@ -1,8 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { Component, useState, type ReactNode } from 'react';
 import { Copy, ExternalLink, RefreshCw } from 'lucide-react';
-import type { AgentProfile, PermissionStatus, SecurityStatus } from '../lib/agentProfile';
+import { computeProfiles, type AgentProfile, type PermissionStatus, type ProfilePermissions, type SecurityStatus } from '../lib/agentProfile';
+import { computeHealth, type FailedDataState, type LiveAgent } from '../lib/agentHealth';
+import { computeRisk } from '../lib/agentRisk';
 import type { HealthStatus } from '../lib/agentHealth';
 import type { RiskLevel } from '../lib/agentRisk';
 import type { LogEntry } from '../lib/activityLog';
@@ -22,8 +24,6 @@ type Props = {
   short: (s: string) => string;
   money: (n: bigint) => string;
   onCopy: (text: string) => void;
-  /** Open straight into one agent's profile (lower-case address, e.g. from the URL hash). */
-  initialSelected?: string;
 };
 
 type Tab = 'overview' | 'config' | 'activity' | 'history';
@@ -38,13 +38,13 @@ const riskText = (l: RiskLevel) => (l === 'Insufficient data' ? l : `${l} risk`)
 const cnt = (c: { value: number | null; lowerBound: boolean }) => (c.value === null ? null : c.lowerBound ? `${c.value}+` : String(c.value));
 const NA = ({ t = 'Unavailable' }: { t?: string }) => <span className="na">{t}</span>;
 
-export default function AgentProfilesView(p: Props) {
-  const [selected, setSelected] = useState(p.initialSelected || '');
+function AgentProfilesView(p: Props) {
+  const [selected, setSelected] = useState('');
   const [tab, setTab] = useState<Tab>('overview');
   const sel = p.profiles.find(x => x.address === selected) || null;
 
-  const open = (addr: string) => { setSelected(addr); setTab('overview'); try { window.history.replaceState(null, '', `#profile=${addr}`); } catch { /* not critical */ } };
-  const close = () => { setSelected(''); try { window.history.replaceState(null, '', window.location.pathname + window.location.search); } catch { /* not critical */ } };
+  const open = (addr: string) => { setSelected(addr); setTab('overview'); };
+  const close = () => setSelected('');
 
   const head = (
     <div className="panel-head">
@@ -298,4 +298,35 @@ function Events({ rows, empty, explorerBase, short }: { rows: LogEntry[]; empty:
       {rows.length > limit && <button className="btn btn-ghost btn-sm" onClick={() => setLimit(n => n + 10)}>Show more ({rows.length - limit} remaining)</button>}
     </>
   );
+}
+
+/* ───────── Isolated entry point used by app/page.tsx ───────── */
+type SectionProps = Omit<Props, 'state' | 'error' | 'profiles' | 'checkedAt' | 'historyOk'> & {
+  loading: boolean; wrongChain: boolean; chain: number;
+  live: { live: Map<string, LiveAgent>; globalPaused: boolean | null; permissions: ProfilePermissions | null; checkedAt: number } | null;
+  entries: LogEntry[] | null; knownAgents: string[];
+  vault: string; owner: string; chainId: number; networkName: string; native: (n: bigint) => string;
+};
+
+/** A render error in Agent Security Profiles is caught here and shown inline; it can never blank the dashboard or hide the agent list. */
+class ProfilesBoundary extends Component<{ children: ReactNode; onRetry: () => void }, { failed: string }> {
+  state = { failed: '' };
+  static getDerivedStateFromError(e: unknown) { return { failed: String((e as any)?.message || e).slice(0, 160) }; }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return <section className="panel"><div className="panel-head"><div><h3>Agent security profiles</h3></div></div><p className="empty">Profiles could not be displayed ({this.state.failed}). Your agents, vault and every other page are not affected. <button className="link" onClick={() => { this.setState({ failed: '' }); this.props.onRetry(); }}>Retry</button></p></section>;
+  }
+}
+
+function ProfilesCompute(s: SectionProps) {
+  const entries = s.entries;
+  const health = s.live ? computeHealth({ entries, failedState: s.failedState as FailedDataState, live: s.live.live, globalPaused: s.live.globalPaused, knownAgents: s.knownAgents, now: s.live.checkedAt }) : null;
+  const rctx = { now: s.live?.checkedAt || Math.floor(Date.now() / 1000), failedState: s.failedState as FailedDataState, short: s.short, native: s.native };
+  const risk = computeRisk(health?.agents || [], entries, rctx);
+  const profiles = s.live && health ? computeProfiles(health.agents, risk.agents, { vault: s.vault, owner: s.owner, chainId: s.chainId, networkName: s.networkName, explorer: s.explorerBase, permissions: s.live.permissions, globalPaused: s.live.globalPaused, entries, now: s.live.checkedAt }) : [];
+  return <AgentProfilesView state={s.wrongChain ? 'error' : s.loading ? 'loading' : 'ok'} error={`your wallet is on chain ${s.chain}; switch to chain ${s.chainId}`} profiles={profiles} checkedAt={s.live?.checkedAt || 0} historyOk={entries !== null} failedState={s.failedState} refreshing={s.refreshing} onRefresh={s.onRefresh} explorerBase={s.explorerBase} short={s.short} money={s.money} onCopy={s.onCopy} />;
+}
+
+export default function AgentProfilesSection(s: SectionProps) {
+  return <ProfilesBoundary onRetry={s.onRefresh}><ProfilesCompute {...s} /></ProfilesBoundary>;
 }
