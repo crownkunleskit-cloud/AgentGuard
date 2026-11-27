@@ -2,14 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserProvider, Contract, Interface, JsonRpcProvider, formatEther, parseEther, isAddress, zeroPadValue } from 'ethers';
-import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, HeartPulse, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Wallet, X } from 'lucide-react';
+import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, HeartPulse, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, ShieldCheck, Wallet, X } from 'lucide-react';
 import Landing from './components/Landing';
 import { Brand } from './components/Mark';
 import { blockscoutSource, scanLogs, type LogSource, type RawLog } from './lib/logScan';
 import { buildEntries, fetchFailedTxs, filterEntries, type FailedTx, type LogEntry, type LogFilter, type ParsedLog } from './lib/activityLog';
 import AgentHealthView, { type HealthPermissions } from './components/AgentHealth';
 import AgentRiskView from './components/AgentRisk';
+import AgentProfilesView from './components/AgentProfiles';
 import { computeRisk } from './lib/agentRisk';
+import { computeProfiles } from './lib/agentProfile';
 import { computeHealth, currentPermissions, type FailedDataState, type LiveAgent } from './lib/agentHealth';
 
 declare global { interface Window { ethereum?: any } }
@@ -18,7 +20,7 @@ type Agent = { address: string; registered: boolean; paused: boolean; maxNativeP
 type EventRow = { title: string; detail: string; hash: string; block: number; kind: 'good' | 'bad' | 'neutral' };
 type AgentsState = 'loading' | 'ok' | 'error';
 const LOG_FILTERS: { id: LogFilter; label: string }[] = [{ id: 'all', label: 'All activity' }, { id: 'transaction', label: 'Transactions' }, { id: 'agent', label: 'Agent activity' }, { id: 'security', label: 'Security events' }];
-type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Agent Health' | 'Risk Insights' | 'Settings';
+type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Agent Health' | 'Risk Insights' | 'Agent Profiles' | 'Settings';
 type Modal = 'agent' | 'recipient' | 'token' | 'fund' | 'withdraw' | 'limits' | 'revoke' | '';
 
 /* ───────── Contracts and network: unchanged from the original build ───────── */
@@ -60,6 +62,7 @@ const NAV: { page: Page; icon: React.ReactNode }[] = [
   { page: 'Activity', icon: <Activity /> },
   { page: 'Agent Health', icon: <HeartPulse /> },
   { page: 'Risk Insights', icon: <ShieldAlert /> },
+  { page: 'Agent Profiles', icon: <ShieldCheck /> },
   { page: 'Settings', icon: <LockKeyhole /> },
 ];
 
@@ -216,8 +219,10 @@ export default function Home() {
   useEffect(() => { if (!window.ethereum) return; const onAccounts = (a: string[]) => { setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
   useEffect(() => { let live = true; (async () => { if (!account || !chain || !factoryAddress || !chainId || chain !== chainId) return; try { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (live && v !== ZERO) setVaultAddress(v); else if (live) setVaultAddress(''); } catch (e: any) { notify('Could not read factory. Check the configured factory address and network.'); } })(); return () => { live = false; }; }, [account, chain, provider]);
   useEffect(() => { setLogs([]); setLogsState('loading'); setLogsError(''); setLogsNote(''); setLogLimit(100); }, [vaultAddress]);
-  useEffect(() => { if ((page === 'Activity' || page === 'Agent Health' || page === 'Risk Insights') && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
+  useEffect(() => { if ((page === 'Activity' || page === 'Agent Health' || page === 'Risk Insights' || page === 'Agent Profiles') && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
   useEffect(() => { healthRun.current++; setHealthLive(null); setHealthBusy(false); }, [vaultAddress]);
+  // Agent Security Profiles deep link: opening the site at #profile=0x… lands on that agent's profile.
+  useEffect(() => { if (typeof window !== 'undefined' && /^#profile=0x[0-9a-fA-F]{40}$/.test(window.location.hash)) setPage('Agent Profiles'); }, []);
 
   // Agent Health: every agent ever registered (from the logs, so revoked agents are included) plus the live-registered ones.
   const healthAddrs = useMemo(() => [...new Set([...agents.map(a => a.address.toLowerCase()), ...(logsState === 'ok' ? logs.filter(e => e.type === 'Agent registered' && e.agent).map(e => e.agent!.toLowerCase()) : [])])].sort(), [agents, logs, logsState]);
@@ -225,7 +230,7 @@ export default function Home() {
   // Live reads (authorization, pause state, approved recipients/tokens) run each time the page opens or is refreshed. A failed read is
   // recorded as a failure (shown as Unknown / Unavailable), never as "not registered" or "none".
   useEffect(() => {
-    if ((page !== 'Agent Health' && page !== 'Risk Insights') || !vaultAddress || !account || chain !== chainId) return;
+    if ((page !== 'Agent Health' && page !== 'Risk Insights' && page !== 'Agent Profiles') || !vaultAddress || !account || chain !== chainId) return;
     const vault = vaultAddress; const run = ++healthRun.current; setHealthBusy(true);
     (async () => {
       const live = new Map<string, LiveAgent>(); let globalPaused: boolean | null = null; let permissions: HealthPermissions | null = null;
@@ -330,7 +335,7 @@ export default function Home() {
         <header className="top">
           <div>
             <small>Workspace / {page}</small>
-            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page === 'Agent Health' ? 'Agent Health Monitoring' : page === 'Risk Insights' ? 'Agent Risk Insights' : page}</h1>
+            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page === 'Agent Health' ? 'Agent Health Monitoring' : page === 'Risk Insights' ? 'Agent Risk Insights' : page === 'Agent Profiles' ? 'Agent Security Profiles' : page}</h1>
           </div>
           <div className="top-actions">
             <span className="net"><i />Robinhood Chain <em>{networkName.toLowerCase()}</em></span>
@@ -513,6 +518,19 @@ export default function Home() {
               const rctx = { now: healthLive?.checkedAt || Math.floor(Date.now() / 1000), failedState, short, native: (n: bigint) => `${formatEther(n)} ${SYMBOL}` };
               const risk = computeRisk(health?.agents || [], entries, rctx);
               return <AgentRiskView state={chain !== chainId ? 'error' : loading ? 'loading' : 'ok'} error={`your wallet is on chain ${chain}; switch to chain ${chainId}`} agents={risk.agents} overview={risk.overview} health={Object.fromEntries((health?.agents || []).map(h => [h.address, h]))} checkedAt={healthLive?.checkedAt || 0} historyOk={logsState === 'ok'} failedState={failedState} refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth} explorerBase={explorerBase} short={short} />;
+            })()}
+
+            {page === 'Agent Profiles' && (() => {
+              // Agent Security Profiles: purely a combination of the Health and Risk results computed exactly as on their own pages
+              // plus the live permission reads (see app/lib/agentProfile.ts). Read-only.
+              const loading = !healthLive || (logsState === 'loading' && !logs.length) || healthAddrs.some(a => !healthLive.live.has(a));
+              const entries = logsState === 'ok' ? logs : null;
+              const health = healthLive ? computeHealth({ entries, failedState, live: healthLive.live, globalPaused: healthLive.globalPaused, knownAgents: agents.map(a => a.address), now: healthLive.checkedAt }) : null;
+              const rctx = { now: healthLive?.checkedAt || Math.floor(Date.now() / 1000), failedState, short, native: (n: bigint) => `${formatEther(n)} ${SYMBOL}` };
+              const risk = computeRisk(health?.agents || [], entries, rctx);
+              const profiles = healthLive && health ? computeProfiles(health.agents, risk.agents, { vault: vaultAddress, owner: account, chainId, networkName, explorer: explorerBase, permissions: healthLive.permissions, globalPaused: healthLive.globalPaused, entries, now: healthLive.checkedAt }) : [];
+              const hashAgent = typeof window !== 'undefined' ? (window.location.hash.match(/^#profile=(0x[0-9a-fA-F]{40})$/)?.[1] || '').toLowerCase() : '';
+              return <AgentProfilesView state={chain !== chainId ? 'error' : loading ? 'loading' : 'ok'} error={`your wallet is on chain ${chain}; switch to chain ${chainId}`} profiles={profiles} checkedAt={healthLive?.checkedAt || 0} historyOk={logsState === 'ok'} failedState={failedState} refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth} explorerBase={explorerBase} short={short} money={money} onCopy={copy} initialSelected={hashAgent} />;
             })()}
 
             {page === 'Settings' && (
