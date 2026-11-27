@@ -141,11 +141,3 @@ Each reverted agent call is assigned to exactly one cause, following the vault c
 **Limitations:** reverted transactions emit no events, so blocked-attempt detections need the explorer API; if it is unreachable those checks are listed as not performed and confidence drops. The revert reason is inferred from on-chain state, not read from the node. Findings are indicators from observable data, not proof of malice. Agents are scored against their own history, so a brand-new agent has no frequency or amount baseline. The V1 contracts record no agent names, no off-chain intent and no attempts that never reached the chain.
 
 No contract, deployment or environment-variable changes are needed.
-
-## Agent Security Profiles
-
-A new **Agent Profiles** page (sidebar, below Risk Insights) gives every registered agent a read-only security profile: identity (wallet, registration status and date, vault, network), configuration (native limits and spend today, transaction permissions, approved recipients, token policies, pause state), health, risk (score, classification, factors, recommendations) and history (recent transactions, failed attempts, security events, registration and management events).
-
-- Implementation is isolated: `app/lib/agentProfile.ts` (pure logic), `app/components/AgentProfiles.tsx` (UI), `test/agentProfile.test.ts`, appended `.sp-*` styles in `app/globals.css`, and a small wiring change in `app/page.tsx`. No contract, SDK, deployment or existing-feature logic was changed.
-- Profiles reuse the existing Activity & Security Logs entries, Agent Health Monitoring and Agent Risk Insights results and the same live contract reads; they add no extra event scans. Nothing is stored; they are rebuilt from the chain on every open or refresh, and `#profile=<agent address>` in the URL reopens a specific profile.
-- Anything that cannot be read is shown as Unavailable, never as zero or safe. The V1 vault has no agent names, no `approve` and no arbitrary calls, so those are reported as "not recorded on-chain" / "Not allowed".
