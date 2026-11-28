@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserProvider, Contract, Interface, JsonRpcProvider, formatEther, parseEther, isAddress, zeroPadValue } from 'ethers';
-import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, HeartPulse, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, ShieldCheck, Wallet, X } from 'lucide-react';
+import { Activity, Bot, ChevronRight, CircleAlert, Copy, ExternalLink, Fingerprint, Bell, HeartPulse, LockKeyhole, Pause, Play, Plus, Power, RefreshCw, TrendingUp, ShieldAlert, SlidersHorizontal, ShieldCheck, Wallet, X } from 'lucide-react';
 import Landing from './components/Landing';
 import { Brand } from './components/Mark';
 import { blockscoutSource, scanLogs, type LogSource, type RawLog } from './lib/logScan';
@@ -10,6 +10,8 @@ import { buildEntries, fetchFailedTxs, filterEntries, type FailedTx, type LogEnt
 import AgentHealthView, { type HealthPermissions } from './components/AgentHealth';
 import AgentRiskView from './components/AgentRisk';
 import AgentProfilesSection from './components/AgentProfiles';
+import SecurityAlertsSection from './components/SecurityAlerts';
+import SpendingAnalyticsSection from './components/SpendingAnalytics';
 import { computeRisk } from './lib/agentRisk';
 import { computeHealth, currentPermissions, type FailedDataState, type LiveAgent } from './lib/agentHealth';
 
@@ -19,7 +21,7 @@ type Agent = { address: string; registered: boolean; paused: boolean; maxNativeP
 type EventRow = { title: string; detail: string; hash: string; block: number; kind: 'good' | 'bad' | 'neutral' };
 type AgentsState = 'loading' | 'ok' | 'error';
 const LOG_FILTERS: { id: LogFilter; label: string }[] = [{ id: 'all', label: 'All activity' }, { id: 'transaction', label: 'Transactions' }, { id: 'agent', label: 'Agent activity' }, { id: 'security', label: 'Security events' }];
-type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Agent Health' | 'Risk Insights' | 'Agent Profiles' | 'Settings';
+type Page = 'Overview' | 'My agents' | 'Permissions' | 'Activity' | 'Agent Health' | 'Risk Insights' | 'Agent Profiles' | 'Security Alerts' | 'Spending Analytics' | 'Settings';
 type Modal = 'agent' | 'recipient' | 'token' | 'fund' | 'withdraw' | 'limits' | 'revoke' | '';
 
 /* ───────── Contracts and network: unchanged from the original build ───────── */
@@ -62,6 +64,8 @@ const NAV: { page: Page; icon: React.ReactNode }[] = [
   { page: 'Agent Health', icon: <HeartPulse /> },
   { page: 'Risk Insights', icon: <ShieldAlert /> },
   { page: 'Agent Profiles', icon: <ShieldCheck /> },
+  { page: 'Security Alerts', icon: <Bell /> },
+  { page: 'Spending Analytics', icon: <TrendingUp /> },
   { page: 'Settings', icon: <LockKeyhole /> },
 ];
 
@@ -218,7 +222,7 @@ export default function Home() {
   useEffect(() => { if (!window.ethereum) return; const onAccounts = (a: string[]) => { setAccount(a[0] || ''); setVaultAddress(''); }; const onChain = (c: string) => { setChain(Number(c)); setVaultAddress(''); }; window.ethereum.on?.('accountsChanged', onAccounts); window.ethereum.on?.('chainChanged', onChain); return () => { window.ethereum?.removeListener?.('accountsChanged', onAccounts); window.ethereum?.removeListener?.('chainChanged', onChain); }; }, []);
   useEffect(() => { let live = true; (async () => { if (!account || !chain || !factoryAddress || !chainId || chain !== chainId) return; try { const c = new Contract(factoryAddress, FACTORY_ABI, provider()); const v = await c.vaultOf(account); if (live && v !== ZERO) setVaultAddress(v); else if (live) setVaultAddress(''); } catch (e: any) { notify('Could not read factory. Check the configured factory address and network.'); } })(); return () => { live = false; }; }, [account, chain, provider]);
   useEffect(() => { setLogs([]); setLogsState('loading'); setLogsError(''); setLogsNote(''); setLogLimit(100); }, [vaultAddress]);
-  useEffect(() => { if ((page === 'Activity' || page === 'Agent Health' || page === 'Risk Insights' || page === 'Agent Profiles') && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
+  useEffect(() => { if ((page === 'Activity' || page === 'Agent Health' || page === 'Risk Insights' || page === 'Agent Profiles' || page === 'Security Alerts' || page === 'Spending Analytics') && vaultAddress && account && chain === chainId) loadLogs(); }, [page, vaultAddress, account, chain, loadLogs]);
   useEffect(() => { healthRun.current++; setHealthLive(null); setHealthBusy(false); }, [vaultAddress]);
 
   // Agent Health: every agent ever registered (from the logs, so revoked agents are included) plus the live-registered ones.
@@ -227,7 +231,7 @@ export default function Home() {
   // Live reads (authorization, pause state, approved recipients/tokens) run each time the page opens or is refreshed. A failed read is
   // recorded as a failure (shown as Unknown / Unavailable), never as "not registered" or "none".
   useEffect(() => {
-    if ((page !== 'Agent Health' && page !== 'Risk Insights' && page !== 'Agent Profiles') || !vaultAddress || !account || chain !== chainId) return;
+    if ((page !== 'Agent Health' && page !== 'Risk Insights' && page !== 'Agent Profiles' && page !== 'Security Alerts' && page !== 'Spending Analytics') || !vaultAddress || !account || chain !== chainId) return;
     const vault = vaultAddress; const run = ++healthRun.current; setHealthBusy(true);
     (async () => {
       const live = new Map<string, LiveAgent>(); let globalPaused: boolean | null = null; let permissions: HealthPermissions | null = null;
@@ -332,7 +336,7 @@ export default function Home() {
         <header className="top">
           <div>
             <small>Workspace / {page}</small>
-            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page === 'Agent Health' ? 'Agent Health Monitoring' : page === 'Risk Insights' ? 'Agent Risk Insights' : page === 'Agent Profiles' ? 'Agent Security Profiles' : page}</h1>
+            <h1>{page === 'Overview' ? 'Security overview' : page === 'Activity' ? 'Activity & Security Logs' : page === 'Agent Health' ? 'Agent Health Monitoring' : page === 'Risk Insights' ? 'Agent Risk Insights' : page === 'Agent Profiles' ? 'Agent Security Profiles' : page === 'Security Alerts' ? 'Security Alerts' : page === 'Spending Analytics' ? 'Spending Analytics' : page}</h1>
           </div>
           <div className="top-actions">
             <span className="net"><i />Robinhood Chain <em>{networkName.toLowerCase()}</em></span>
@@ -527,6 +531,41 @@ export default function Home() {
                 vault={vaultAddress} owner={account} chainId={chainId} networkName={networkName}
                 refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth}
                 explorerBase={explorerBase} short={short} money={money} native={(n: bigint) => `${formatEther(n)} ${SYMBOL}`} onCopy={copy}
+              />
+            )}
+
+            {page === 'Security Alerts' && (
+              // Security Alerts is isolated: it only READS the data above (agents, logs, live reads) and computes inside its own
+              // error boundary, so a failure here can never affect the agent list or any other page.
+              <SecurityAlertsSection
+                loading={!healthLive || (logsState === 'loading' && !logs.length) || healthAddrs.some(a => !healthLive.live.has(a))}
+                wrongChain={chain !== chainId} chain={chain} chainId={chainId} vault={vaultAddress}
+                live={healthLive} entries={logsState === 'ok' ? logs : null} failedState={failedState} knownAgents={agents.map(a => a.address)}
+                refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth}
+                explorerBase={explorerBase} short={short} native={(n: bigint) => `${formatEther(n)} ${SYMBOL}`}
+              />
+            )}
+
+            {page === 'Spending Analytics' && (
+              // Spending Analytics is isolated: it only READS the data above (agents, the vault event log, live reads) and computes inside
+              // its own error boundary, so a failure here can never affect the agent list or any other page.
+              <SpendingAnalyticsSection
+                loading={!healthLive || (logsState === 'loading' && !logs.length) || healthAddrs.some(a => !healthLive.live.has(a))}
+                wrongChain={chain !== chainId} chain={chain} chainId={chainId}
+                live={healthLive} entries={logsState === 'ok' ? logs : null} failedState={failedState} knownAgents={agents.map(a => a.address)}
+                refreshing={busy || healthBusy || logsState === 'loading'} onRefresh={refreshHealth}
+                explorerBase={explorerBase} short={short} nativeSymbol={SYMBOL}
+                readTokenMeta={async (token: string) => {
+                  // One decimals()/symbol() read per distinct token. Public RPC first, then the wallet, like the other live reads.
+                  const abi = ['function decimals() view returns (uint8)', 'function symbol() view returns (string)'];
+                  const provs: any[] = []; try { if (READ_RPC) provs.push(new JsonRpcProvider(READ_RPC, chainId, { staticNetwork: true })); } catch { /* ignore */ } try { provs.push(provider()); } catch { /* no wallet */ }
+                  let last: any = new Error('No provider available');
+                  for (const pv of provs) {
+                    try { const c = new Contract(token, abi, pv); const decimals = Number(await c.decimals()); let symbol: string | null = null; try { symbol = String(await c.symbol()).slice(0, 12) || null; } catch { /* symbol is optional */ } return { decimals, symbol }; }
+                    catch (e) { last = e; }
+                  }
+                  throw last;
+                }}
               />
             )}
 

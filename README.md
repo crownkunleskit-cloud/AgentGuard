@@ -149,3 +149,21 @@ A new **Agent Profiles** page (sidebar, below Risk Insights) gives every registe
 - Implementation is isolated: `app/lib/agentProfile.ts` (pure logic), `app/components/AgentProfiles.tsx` (UI), `test/agentProfile.test.ts`, appended `.sp-*` styles in `app/globals.css`, and a small wiring change in `app/page.tsx`. No contract, SDK, deployment or existing-feature logic was changed.
 - Profiles reuse the existing Activity & Security Logs entries, Agent Health Monitoring and Agent Risk Insights results and the same live contract reads; they add no extra event scans. Nothing is stored; they are rebuilt from the chain on every open or refresh. The page computes inside its own error boundary and only reads the dashboard's existing agent data, so it cannot affect the agent list.
 - Anything that cannot be read is shown as Unavailable, never as zero or safe. The V1 vault has no agent names, no `approve` and no arbitrary calls, so those are reported as "not recorded on-chain" / "Not allowed".
+
+## Security Alerts
+
+A new **Security Alerts** page (sidebar, below Agent Profiles) is a notification centre built only from data AgentGuard already reads: the Activity & Security Logs, Agent Health (live agent state) and Agent Risk Insights. Alert types: Unusual agent activity, Spending limit (80% and 100% of the daily native-coin limit), Unauthorized recipient, Agent status (paused, resumed, revoked, inactive), High risk and Security event. Each alert has a severity (Critical, High, Medium, Low), agent address, timestamp and read/unread state; the page has severity and type filters, "Mark as read" and "Mark all as read".
+
+- Alerts are checked when the page is opened or refreshed ("Check now"), not streamed live. An optional 60-second auto-check and optional browser notifications are both off until switched on.
+- Every alert has a stable id derived from the on-chain fact behind it, so repeated reads never duplicate an alert. Read state is stored per chain and vault in this browser's localStorage only.
+- Unauthorized-recipient and blocked-attempt alerts need reverted transactions from the block explorer; if those cannot be loaded the page says so instead of showing an all-clear.
+- Isolated by design: `app/lib/securityAlerts.ts` (pure logic), `app/components/SecurityAlerts.tsx` (UI, own error boundary), `test/securityAlerts.test.ts`, appended `.al-*` styles, and a small wiring change in `app/page.tsx`. It never writes agent state and never triggers agent discovery. No new environment variables.
+
+## Spending Analytics
+
+A new **Spending Analytics** page (sidebar, below Security Alerts) shows how registered agents have spent funds from the connected vault: total successful transactions and a separate total per token, a daily / weekly / monthly (UTC) chart of one asset at a time, a per-agent breakdown (with "Inspect this agent"), a token breakdown, today's daily-limit utilization per agent, and a spending history with period, agent, token and status filters and Blockscout links.
+
+- Data comes only from what the dashboard already loads: the vault's `NativeTransferExecuted` / `TokenTransferExecuted` events (the vault emits them only after a transfer succeeds) and the explorer's reverted transactions (shown as failed attempts, never counted). Owner withdrawals are excluded. No new transaction fetching, no new agent discovery.
+- Different tokens are never added together. Decimals come from each token's own `decimals()` read (one read per distinct token, cached for the session); if it cannot be read, raw units are shown, never an assumed 18. No USD values are shown because AgentGuard has no price source.
+- Limit utilization reuses the live `agents(address)` read from Agent Health. ERC-20 daily limits are vault-wide and are not read, so only native-coin utilization is shown.
+- Isolated: `app/lib/spendingAnalytics.ts` (pure logic), `app/components/SpendingAnalytics.tsx` (UI with its own error boundary), `test/spendingAnalytics.test.ts`, appended `.sa-*` styles, and a small wiring change in `app/page.tsx`. No polling and no new environment variables.
